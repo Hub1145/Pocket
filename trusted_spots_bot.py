@@ -21,9 +21,9 @@ class TrustedSpotsBot:
         # Risk Management State
         rm_config = config.get("risk_management", {})
         self.start_balance = 0.0
-        self.daily_target_pct = rm_config.get("daily_target_pct", 0.15)
-        self.max_losses_streak = rm_config.get("max_losses_streak", 2)
-        self.max_trades_per_day = rm_config.get("max_trades_per_day", 3)
+        self.daily_target_pct = rm_config.get("daily_target_pct", 0.30)
+        self.max_losses_streak = rm_config.get("max_losses_streak", 3)
+        self.max_trades_per_day = rm_config.get("max_trades_per_day", 5)
         self.min_payout = rm_config.get("min_payout_pct", 0.80)
 
         self.current_losses_streak = 0
