@@ -1,118 +1,44 @@
-# Trusted Spots 1-Minute Trading Strategy Guide
-## ($10 to $10,000 Challenge Edition)
+# Trusted Spots Strategy Guide
+*Based on the $10 to $10,000 Trading Challenge*
 
-This guide synthesizes the trading strategy and lessons from the "TRUSTED SPOTS" Trading Challenge, optimized for a **$10 to $10,000** compounding journey.
+This guide details the "Pure Price Action" strategy implemented in the bot, derived from the YouTube challenge series.
 
-## 1. Strategy Overview
-- **Platform**: Pocket Option (or Quotex).
-- **Timeframe**: 1-Minute Candlesticks.
-- **Expiry**: 1 Minute.
-- **Style**: Pure Price Action Reversals (No Indicators).
+## 1. SNR Selection (The "Trusted Spots")
+We don't trade every line. We only trade "Trusted Spots" that meet 5 core criteria:
+1. **Extreme Levels:** The highest and lowest points on the 1-minute chart within the recent 100 candles.
+2. **Series of Rejections:** Points where price has touched and reversed multiple times (Pivot Points).
+3. **Obviousness:** If you have to squint to see it, it's not a trusted spot.
+4. **Drastic Movement:** Levels from which price previously moved away rapidly (indicating high supply/demand).
+5. **S/R Flip:** A former resistance that now acts as support (or vice-versa).
 
-## 2. Identifying "Trusted Spots" (Strong SNR)
-A "Trusted Spot" is a high-probability Support or Resistance level. A level must meet as many of these 5 criteria as possible:
-1. **Extreme Levels**: The absolute highest and lowest points in the recent chart view.
-2. **Series of Rejections**: Multiple touches and bounces off the level (best in ranging markets).
-3. **Obviousness**: The level should be easy to spot within 3 seconds.
-4. **Drastic Movement**: Price must move away sharply and significantly after touching the level.
-5. **Role Reversal (S/R Flip)**: The level has acted as both support and resistance in the past.
+### Implementation Logic:
+The bot scans the last 100 1-minute candles. It identifies peaks and troughs and clusters them. Only levels with at least 2 touches (rejections) are considered "Active Zones."
 
-### 2.1 Technical Zone Definition (LuxAlgo Pivot Point Logic)
-To automate this, the bot uses **Pivot Point Analysis** (based on LuxAlgo logic) to define SNR **Zones**:
-- **Pivot Identification**: A Pivot High is defined as the highest high within a window of `leftBars` and `rightBars` (default 15).
-- **Resistance Zone**: Between the **Pivot High (Wick)** and the **Open/Close (Body)** of that same pivot candle.
-- **Support Zone**: Between the **Pivot Low (Wick)** and the **Open/Close (Body)** of that same pivot candle.
-- **Volume Oscillator Filter**: Levels are tracked along with a Volume Oscillator (`100 * (EMA5 - EMA10) / EMA10`).
-- *Logic*: The zone represents a historical area of supply/demand. A touch followed by a volume-confirmed rejection is the primary entry signal.
+## 2. The Candlestick Story (Approach)
+How price approaches the level is more important than the level itself.
+- **Exhaustion:** We look for candles getting smaller as they approach the zone.
+- **Trap:** A "fake" breakout where price spikes through the zone and immediately pulls back.
+- **Avoid Aggression:** If a massive Marubozu candle (full body, no wicks) slams into the zone, we **do not trade**. This indicates a breakout, not a reversal.
 
-## 3. The "Candlestick Story" Analysis
-Before entering, "Trusted Spots" teaches reading the "story" told by the candles to identify high-probability setups:
+## 3. Entry Confirmation (5-Second Chart)
+Once a 1-minute zone is touched:
+1. Switch focus to the **5-second stream**.
+2. Look for a micro-reversal pattern:
+   - **Pin Bar / Hammer:** Long wick sticking into the zone.
+   - **Engulfing:** A small candle followed by a larger candle in the opposite direction.
+   - **Indecision:** A Doji candle exactly at the line.
 
-### 3.1 Approach & Exhaustion (1m Filter)
-The bot analyzes the 1-minute candles leading into the zone to filter out "Knife Catching":
-1. **Aggressive Approach (Avoid)**: If the 1m candle is a **Marubozu** (large solid body, no wicks) hitting the SNR, it indicates high momentum. **Do not trade** the first touch; wait for a breakout or a massive rejection.
-2. **Exhausted Approach (Ideal)**: If the 1m candles are getting smaller (**Decreasing Body Size**) and showing wicks in the direction of the SNR, the move is exhausted.
-3. **The Trap (Liquidity Grab)**: A candle that briefly breaks the level but closes back inside with a long wick is a prime signal.
+The bot automates this by monitoring the 5s WebSocket stream for these specific price action patterns.
 
-### 3.2 Key Candlestick Patterns
-The bot specifically looks for these shapes at the SNR:
-- **Hammer / Shooting Star**: A small body with a wick at least **2x the body size** pointing into the SNR. This shows the level has been tested and rejected.
-- **Engulfing**: An opposite-colored candle that completely covers the previous candle's body, indicating a shift in power.
-- **Doji / Spinning Top**: Tiny bodies showing market indecision. When this happens at a "Trusted Spot," it usually precedes a reversal.
+## 4. Risk Management (The Challenge Rules)
+- **Daily Target:** 30% profit. Once hit, the bot stops.
+- **Stake Scaling:**
+  - Balance < $20: Flat $1 stake.
+  - Balance >= $20: 5% of current balance (Compounding).
+- **Kill Switch:** 3 consecutive losses or 5 total trades per day ends the session.
 
-## 4. Multi-Timeframe Confirmation (1m/5s)
-The core of the execution is the **Micro-Rejection** technique:
-- **1-Minute Chart (Macro)**: Draw your Trusted Spots zones.
-- **5-Second Chart (Micro)**: Switch to this view the moment price enters the 1m zone.
-- **Entry Confirmation Patterns on 5s**:
-    - **The Stall**: Price enters the zone and "stops" moving for 2-3 small 5s candles.
-    - **The Momentum Spike (The Trap)**: A quick, aggressive 5s candle that "breaks out" of the zone momentarily but fails to hold. *This "full momentum" spike is actually the signal to enter the reversal once it begins to pull back.*
-    - **The Spike & Pull**: A quick 5s spike through the zone that immediately forms a long wick.
-    - **The Reversal Candle**: A 5s Hammer or Shooting Star forming *within* or *at the edge* of the zone.
-- **Automation Note on Momentum**: If the 5s candles continue to close **outside** the zone with strong bodies (Full Momentum Breakout), do NOT enter. The reversal requires a visible loss of momentum or a pull-back into the zone.
-
-## 5. Execution Workflow
-1. **Level Identification**: Draw "Trusted Spots" on the 1-minute chart.
-2. **Patience**: Wait for price to enter your "Zone."
-3. **Switch**: Open the **5-second timeframe** tab or toggle.
-4. **Confirmation**: Wait for the micro-rejection (wick or stall) on the 5s chart.
-5. **Trade**: Enter a 1-minute trade in the direction of the reversal.
-
-## 6. Scaled Risk Management: The "Kill Switch"
-The strategy relies on a strict **Kill Switch Strategy** to survive the compounding journey, scaled for bot execution:
-- **Starting Balance**: $10.
-- **Compounding Goal**: $10,000.
-- **Daily Target**: **30% profit** on the starting balance of the day.
-- **Trade Count**: Typically **3 to 5 high-quality trades** per day. Stop immediately once the 30% target is reached.
-- **Compounding Duration**: With a 30% daily gain, $10 turns into $10,000 in approximately **27 days** of successful trading.
-- **Observed Stop Loss**: If you suffer **3 consecutive losses** or if market conditions stop respecting the SNR zones, activate the "Kill Switch" and stop for the day to preserve capital.
-- **Small Account Stake**:
-    - If balance is below **$20**, use a fixed **$1 stake**.
-    - If balance is above **$20**, move towards a fixed **5%** compounding stake per trade.
-    - **Never Martingale**: Do not double your stake after a loss.
-
-## 7. Psychology & Discipline
-- **Selective Trading**: Quality > Quantity. He only trades when all 5 SNR criteria and the 5-second confirmation align.
-- **Avoid Revenge Trading**: He emphasizes accepting losses and not trying to "win back" money in the same session.
-- **Avoid FOMO**: He teaches that missing a setup is fine because the market is infinite, but a bad trade can set the challenge back days.
-- **Gambler's Fallacy**: Treating each trade as a fresh, independent event regardless of previous wins or losses.
-
-## 8. Market Selection (Observed)
-- **OTC Markets**: He frequently trades OTC pairs on Pocket Option, which provide high payouts (often 92%).
-- **Multi-Asset Strategy**: The trader scans multiple high-payout pairs (EURUSD_otc, GBPUSD_otc, AUDUSD_otc, etc.) to find the "Cleanest" levels. He does not stick to just one pair.
-- **Payout Threshold**: He typically looks for payouts above **80%** to ensure his 15% daily target is achievable with 2-3 successful trades.
-
-## 9. Pro Tips & Lessons
-- **Lesson 1**: Market direction is secondary to level reaction. Even in a downtrend, a strong support (Trusted Spot) will usually produce a 1-minute bounce.
-- **Lesson 2**: If the 5s chart shows "Breaking with Momentum," do not enter even if it touches your 1m level.
-- **Lesson 3**: The best trades are those where the 1m level is "Clean" (no messy price action around it).
-- **Lesson 4**: Consistency comes from doing the same thing every day. He replicates the same process in every video of the challenge.
-
-## 10. Bot Automation Logic (Developer Spec)
-These technical parameters control the bot's precision:
-- **`snr_update_interval_mins`**: How often (in minutes) the bot recalculates Support and Resistance zones. This ensures the bot follows the shifting market structure.
-- **`rejection_monitor_seconds`**: The maximum time the bot spends in the 5-second "Confirmation" phase. If a micro-rejection isn't detected within this window after touching a zone, the trade is discarded.
-
-### 10.1 Logic Flow
-If you are building a bot for this strategy, follow this logic flow:
-1. **Filter**: Identify 1m candles meeting the 5 "Trusted Spot" criteria.
-2. **Zone Mapping**: Create a rectangle between `High` and `Max(Open, Close)` for Resistance, or `Low` and `Min(Open, Close)` for Support.
-3. **Trigger**: When `Price_Current` enters the Zone on the 1m chart.
-4. **Exhaustion Filter (1m)**: Check the last candle. If it is a Marubozu (Body/Range > 0.8) in the direction of the SNR, **ABORT**.
-5. **Validation (5s Stream)**:
-   - Start 5s interval check.
-   - **Signal Rejection**: If 5s candle shows Engulfing, Hammer, or Doji **within** the zone.
-   - **Signal Spike**: If 5s candle wicks through the zone by 1.5x body size.
-   - **Invalidate**: If 5s candle closes **outside** the zone with full momentum.
-6. **Trade**: 1 Minute Expiry in the opposite direction of the Approach.
-6. **Account Scaling (Bot Stake)**:
-   - If `Balance` < $20: `Stake` = $1 (Minimum).
-   - If `Balance` >= $20: `Stake` = `Balance * 0.05` (5% risk).
-   - Max trades per day = 5.
-   - Session Stop = If `Profit_Daily` >= `Balance_Start * 0.30` OR `Loss_Daily` >= 3.
-
-## 11. Challenge Reset Rule
-If at any point the discipline is broken (over-trading, revenge trading, or ignoring the Kill Switch), the challenge must be **reset to Day 1** ($10). Consistency in following the process is more important than the daily result.
-
----
-*Disclaimer: Trading involves significant risk. This guide is for educational purposes based on the analyzed content.*
+## 5. Daily Routine
+1. **Reset:** Every morning, the bot captures the "Day Start Balance."
+2. **Scan:** It identifies the 5 strongest zones per asset.
+3. **Wait:** It sits IDLE until a price touch is detected.
+4. **Execute:** It confirms rejection on the 5s timeframe and places a 1-minute trade.

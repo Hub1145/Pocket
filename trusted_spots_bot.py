@@ -33,13 +33,10 @@ class TrustedSpotsBot:
         self.kill_switch_active = False
         self.stop_event = asyncio.Event()
 
-        # Automation Params (LuxAlgo Config)
+        # Automation Params
         auto_config = config.get("automation", {})
         self.snr_update_interval = auto_config.get("snr_update_interval_mins", 15)
         self.rejection_window = auto_config.get("rejection_monitor_seconds", 30)
-        self.left_bars = auto_config.get("left_bars", 15)
-        self.right_bars = auto_config.get("right_bars", 15)
-        self.volume_thresh = auto_config.get("volume_threshold", 20)
 
         # State Management
         self.resistance_zones: Dict[str, List[Dict]] = {asset: [] for asset in self.assets}
@@ -159,7 +156,7 @@ class TrustedSpotsBot:
                     self.cooldown_until[asset] = time.time() + 30
                     return
 
-                logger.info(f"[{asset}] LuxAlgo: Pivot Point Touch: {current_price}")
+                logger.info(f"[{asset}] Zone Touch Detected: {current_price}")
                 self.asset_states[asset] = "TOUCHING"
                 self.touch_start_time[asset] = time.time()
                 self.config[f"{asset}_target_dir"] = target_dir
@@ -179,12 +176,15 @@ class TrustedSpotsBot:
                 self._report_update()
 
     async def _is_approach_aggressive(self, asset: str, direction: OrderDirection) -> bool:
+        """Exhaustion Filter: Check if the 1m approach is too strong (momentum) or showing rejection (exhaustion)"""
         try:
             candles = await self.client.get_candles(asset, 60, count=2)
             if len(candles) < 2: return False
             last = candles[-1]
             body = abs(last.close - last.open)
             total_range = last.high - last.low if last.high > last.low else 0.0001
+
+            # Marubozu Check
             if (direction == OrderDirection.PUT and last.close > last.open and body/total_range > 0.8) or \
                (direction == OrderDirection.CALL and last.close < last.open and body/total_range > 0.8):
                 return True
@@ -199,8 +199,8 @@ class TrustedSpotsBot:
         return None
 
     async def _check_rejection_confirmed(self, asset: str, stream_data: Dict, direction: OrderDirection) -> bool:
-        """Analyze the stream data for LuxAlgo Rejection Patterns"""
-        candles = self.client._parse_stream_candles(stream_data, asset, 5)
+        """Analyze the stream data for 5s candlestick patterns: Hammer, Shooting Star, Engulfing"""
+        candles = self.client.parse_stream_candles(stream_data, asset, 5)
         if len(candles) < 2: return False
         last, prev = candles[-1], candles[-2]
         last_body, prev_body = abs(last.close - last.open), abs(prev.close - prev.open)
@@ -209,18 +209,18 @@ class TrustedSpotsBot:
 
         # 1. Engulfing (Momentum Shift)
         if direction == OrderDirection.PUT and last.close < last.open and prev.close > prev.open and last_body > prev_body * 0.7:
-            logger.info(f"[{asset}] LuxAlgo: Bearish Rejection Confirmed.")
+            logger.info(f"[{asset}] 5s Bearish Rejection confirmed.")
             return True
         if direction == OrderDirection.CALL and last.close > last.open and prev.close < prev.open and last_body > prev_body * 0.7:
-            logger.info(f"[{asset}] LuxAlgo: Bullish Rejection Confirmed.")
+            logger.info(f"[{asset}] 5s Bullish Rejection confirmed.")
             return True
 
-        # 2. Pin Bars (LuxAlgo Wicks)
+        # 2. Pin Bars (Wicks)
         if direction == OrderDirection.PUT and wick_top > last_body * 1.8:
-            logger.info(f"[{asset}] LuxAlgo: Shooting Star Wick detected.")
+            logger.info(f"[{asset}] 5s Shooting Star Wick detected.")
             return True
         if direction == OrderDirection.CALL and wick_bottom > last_body * 1.8:
-            logger.info(f"[{asset}] LuxAlgo: Hammer Wick detected.")
+            logger.info(f"[{asset}] 5s Hammer Wick detected.")
             return True
 
         # 3. Indecision (Doji)
@@ -228,71 +228,77 @@ class TrustedSpotsBot:
         return False
 
     async def get_stake(self) -> float:
+        """Refined Stake Logic for $10-$10k Challenge:
+        - If balance < $20, use $1 stake.
+        - If balance >= $20, use 5% compounding stake.
+        """
         balance = self.current_balance_cached
         if balance < 20.0: return 1.0
         return max(1.0, round(balance * 0.05, 2))
 
     async def check_kill_switch(self) -> bool:
+        """Check if session should end based on daily start balance"""
         profit = self.current_balance_cached - self.day_start_balance
         if profit >= self.day_start_balance * self.daily_target_pct:
-            logger.success(f"GOAL MET: +${profit:.2f}. Kill Switch ON.")
+            logger.success(f"DAILY GOAL MET: +${profit:.2f} (>= 30%). Kill Switch ON.")
             self.kill_switch_active = True
             self._report_update()
             return True
         if self.current_losses_streak >= self.max_losses_streak:
-            logger.warning(f"LOSS LIMIT: {self.current_losses_streak} losses. Kill Switch ON.")
+            logger.warning(f"LOSS LIMIT HIT: {self.current_losses_streak} losses. Kill Switch ON.")
             self.kill_switch_active = True
             self._report_update()
             return True
         if self.trades_taken_today >= self.max_trades_per_day:
-            logger.info(f"TRADE LIMIT: {self.trades_taken_today} trades. Kill Switch ON.")
+            logger.info(f"TRADE LIMIT REACHED: {self.trades_taken_today} trades. Kill Switch ON.")
             self.kill_switch_active = True
             self._report_update()
             return True
         return False
 
     async def update_snr_zones(self, asset: str):
-        """Remap SNR using LuxAlgo Pivot Point logic"""
+        """Identify 'Trusted Spots' on 1m chart based on 5 criteria from videos"""
         try:
-            candles = await self.client.get_candles(asset, 60, count=300)
+            candles = await self.client.get_candles(asset, 60, count=100)
             if not candles: return
             self.resistance_zones[asset], self.support_zones[asset] = [], []
-            df = pd.DataFrame([{'high': c.high, 'low': c.low, 'open': c.open, 'close': c.close, 'volume': c.volume or 0} for c in candles])
+            df = pd.DataFrame([{'high': c.high, 'low': c.low, 'open': c.open, 'close': c.close} for c in candles])
 
-            # LuxAlgo Volume Oscillator
-            if 'volume' in df and len(df) > 10:
-                short_vol = df['volume'].ewm(span=5, adjust=False).mean()
-                long_vol = df['volume'].ewm(span=10, adjust=False).mean()
-                df['vol_osc'] = 100 * (short_vol - long_vol) / long_vol
-            else: df['vol_osc'] = 0
+            # 1. Extreme Levels
+            res_idx, sup_idx = df['high'].idxmax(), df['low'].idxmin()
+            self.resistance_zones[asset].append({'upper': df['high'].iloc[res_idx], 'lower': max(df['open'].iloc[res_idx], df['close'].iloc[res_idx])})
+            self.support_zones[asset].append({'lower': df['low'].iloc[sup_idx], 'upper': min(df['open'].iloc[sup_idx], df['close'].iloc[sup_idx])})
 
-            # LuxAlgo Pivot logic (LeftBars, RightBars)
-            def get_pivots(data, left, right):
-                hp, lp = [], []
-                for i in range(left, len(data) - right):
-                    if data['high'].iloc[i] == data['high'].iloc[i-left:i+right+1].max(): hp.append(i)
-                    if data['low'].iloc[i] == data['low'].iloc[i-left:i+right+1].min(): lp.append(i)
-                return hp, lp
+            # 2. Series of Rejections (Pivot Points)
+            peaks = df[(df['high'] == df['high'].rolling(10, center=True).max())]
+            troughs = df[(df['low'] == df['low'].rolling(10, center=True).min())]
 
-            hp_indices, lp_indices = get_pivots(df, self.left_bars, self.right_bars)
+            def cluster(levels, is_res=True):
+                zones = []
+                for _, row in levels.iterrows():
+                    val = row['high'] if is_res else row['low']
+                    found = False
+                    for z in zones:
+                        if abs(z['ref'] - val) / val < 0.0005:
+                            z['count'] += 1
+                            found = True
+                            break
+                    if not found:
+                        if is_res: zones.append({'upper': row['high'], 'lower': max(row['open'], row['close']), 'ref': row['high'], 'count': 1})
+                        else: zones.append({'lower': row['low'], 'upper': min(row['open'], row['close']), 'ref': row['low'], 'count': 1})
+                return [z for z in zones if z['count'] >= 2]
 
-            for idx in hp_indices:
-                self.resistance_zones[asset].append({
-                    'upper': df['high'].iloc[idx], 'lower': max(df['open'].iloc[idx], df['close'].iloc[idx]),
-                    'vol_osc': df['vol_osc'].iloc[idx] if 'vol_osc' in df else 0
-                })
-            for idx in lp_indices:
-                self.support_zones[asset].append({
-                    'lower': df['low'].iloc[idx], 'upper': min(df['open'].iloc[idx], df['close'].iloc[idx]),
-                    'vol_osc': df['vol_osc'].iloc[idx] if 'vol_osc' in df else 0
-                })
+            self.resistance_zones[asset].extend(cluster(peaks, True))
+            self.support_zones[asset].extend(cluster(troughs, False))
 
+            # Keep only unique/significant zones
             self.resistance_zones[asset] = self.resistance_zones[asset][-5:]
             self.support_zones[asset] = self.support_zones[asset][-5:]
+
             self.last_snr_update[asset] = datetime.now()
             self._report_update()
         except Exception as e:
-            logger.error(f"LuxAlgo SNR Error ({asset}): {e}")
+            logger.error(f"SNR Update Error ({asset}): {e}")
 
     async def monitor_and_trade(self):
         logger.info("Bot logic active.")
@@ -301,9 +307,11 @@ class TrustedSpotsBot:
                 if datetime.now().date() > self.current_day:
                     await self.start_new_session()
                     self.current_day = datetime.now().date()
+
                 if self.kill_switch_active:
                     await asyncio.sleep(60)
                     continue
+
                 for asset in self.assets:
                     if datetime.now() - self.last_snr_update[asset] > timedelta(minutes=self.snr_update_interval):
                         await self.update_snr_zones(asset)

@@ -1310,7 +1310,7 @@ class AsyncPocketOptionClient:
             ):
                 future = self._candle_requests[request_id]
                 if not future.done():
-                    candles = self._parse_stream_candles(data, asset, period)
+                    candles = self.parse_stream_candles(data, asset, period)
                     if candles:
                         future.set_result(candles)
                         if self.enable_logging:
@@ -1322,7 +1322,7 @@ class AsyncPocketOptionClient:
             if self.enable_logging:
                 logger.error(f"Error handling candles stream: {e}")
 
-    def _parse_stream_candles(
+    def parse_stream_candles(
         self, stream_data: Dict[str, Any], asset: str, timeframe: int
     ):
         """Parse candles from stream update data (changeSymbol response)"""

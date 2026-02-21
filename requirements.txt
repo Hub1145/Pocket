@@ -6,4 +6,3 @@ loguru
 pandas
 websockets==11.0
 pydantic
-loguru
