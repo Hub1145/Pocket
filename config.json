@@ -22,6 +22,9 @@
     },
     "automation": {
         "snr_update_interval_mins": 15,
-        "rejection_monitor_seconds": 30
+        "rejection_monitor_seconds": 30,
+        "left_bars": 15,
+        "right_bars": 15,
+        "volume_threshold": 20
     }
 }

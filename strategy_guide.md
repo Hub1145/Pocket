@@ -17,11 +17,13 @@ A "Trusted Spot" is a high-probability Support or Resistance level. A level must
 4. **Drastic Movement**: Price must move away sharply and significantly after touching the level.
 5. **Role Reversal (S/R Flip)**: The level has acted as both support and resistance in the past.
 
-### 2.1 Technical Zone Definition (For Automation)
-To automate this, the SNR should be defined as a **Zone** rather than a single line:
-- **Resistance Zone**: Between the **High (Wick)** and the **Open/Close (Body)** of the defining candle(s).
-- **Support Zone**: Between the **Low (Wick)** and the **Open/Close (Body)** of the defining candle(s).
-- *Logic*: The zone represents the area of "Price Rejection." If price enters this zone, it is "in the spot."
+### 2.1 Technical Zone Definition (LuxAlgo Pivot Point Logic)
+To automate this, the bot uses **Pivot Point Analysis** (based on LuxAlgo logic) to define SNR **Zones**:
+- **Pivot Identification**: A Pivot High is defined as the highest high within a window of `leftBars` and `rightBars` (default 15).
+- **Resistance Zone**: Between the **Pivot High (Wick)** and the **Open/Close (Body)** of that same pivot candle.
+- **Support Zone**: Between the **Pivot Low (Wick)** and the **Open/Close (Body)** of that same pivot candle.
+- **Volume Oscillator Filter**: Levels are tracked along with a Volume Oscillator (`100 * (EMA5 - EMA10) / EMA10`).
+- *Logic*: The zone represents a historical area of supply/demand. A touch followed by a volume-confirmed rejection is the primary entry signal.
 
 ## 3. The "Candlestick Story" Analysis
 Before entering, "Trusted Spots" teaches reading the "story" told by the candles to identify high-probability setups:

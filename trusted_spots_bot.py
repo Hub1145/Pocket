@@ -37,6 +37,9 @@ class TrustedSpotsBot:
         auto_config = config.get("automation", {})
         self.snr_update_interval = auto_config.get("snr_update_interval_mins", 15)
         self.rejection_window = auto_config.get("rejection_monitor_seconds", 30)
+        self.left_bars = auto_config.get("left_bars", 15)
+        self.right_bars = auto_config.get("right_bars", 15)
+        self.volume_thresh = auto_config.get("volume_threshold", 20)
 
         # State Management
         self.resistance_zones: Dict[str, List[Dict]] = {asset: [] for asset in self.assets}
@@ -235,35 +238,77 @@ class TrustedSpotsBot:
         return False
 
     async def update_snr_zones(self, asset: str):
+        """Remap SNR using LuxAlgo Pivot Point logic"""
         try:
-            candles = await self.client.get_candles(asset, 60, count=100)
+            # Fetch more candles to accurately calculate long-term EMAs and Pivots
+            candles = await self.client.get_candles(asset, 60, count=300)
             if not candles: return
             self.resistance_zones[asset], self.support_zones[asset] = [], []
-            df = pd.DataFrame([{'high': c.high, 'low': c.low, 'open': c.open, 'close': c.close} for c in candles])
-            res_idx, sup_idx = df['high'].idxmax(), df['low'].idxmin()
-            self.resistance_zones[asset].append({'upper': df['high'].iloc[res_idx], 'lower': max(df['open'].iloc[res_idx], df['close'].iloc[res_idx])})
-            self.support_zones[asset].append({'lower': df['low'].iloc[sup_idx], 'upper': min(df['open'].iloc[sup_idx], df['close'].iloc[sup_idx])})
-            peaks = df[(df['high'] == df['high'].rolling(10, center=True).max())]
-            troughs = df[(df['low'] == df['low'].rolling(10, center=True).min())]
-            def cluster(levels, is_res=True):
-                zones = []
-                for _, row in levels.iterrows():
-                    val = row['high'] if is_res else row['low']
-                    found = False
-                    for z in zones:
-                        if abs(z['ref'] - val) / val < 0.0005:
-                            z['count'] += 1
-                            found = True
+
+            df = pd.DataFrame([{
+                'high': c.high, 'low': c.low,
+                'open': c.open, 'close': c.close,
+                'volume': c.volume or 0
+            } for c in candles])
+
+            # Volume Oscillator (LuxAlgo Logic)
+            if 'volume' in df and len(df) > 10:
+                short_vol = df['volume'].ewm(span=5, adjust=False).mean()
+                long_vol = df['volume'].ewm(span=10, adjust=False).mean()
+                df['vol_osc'] = 100 * (short_vol - long_vol) / long_vol
+            else:
+                df['vol_osc'] = 0
+
+            # Pivot Calculation
+            def get_pivots(data, left, right):
+                high_pivots = []
+                low_pivots = []
+                for i in range(left, len(data) - right):
+                    # Pivot High
+                    is_high = True
+                    for j in range(i - left, i + right + 1):
+                        if data['high'].iloc[j] > data['high'].iloc[i]:
+                            is_high = False
                             break
-                    if not found:
-                        if is_res: zones.append({'upper': row['high'], 'lower': max(row['open'], row['close']), 'ref': row['high'], 'count': 1})
-                        else: zones.append({'lower': row['low'], 'upper': min(row['open'], row['close']), 'ref': row['low'], 'count': 1})
-                return [z for z in zones if z['count'] >= 2]
-            self.resistance_zones[asset].extend(cluster(peaks, True))
-            self.support_zones[asset].extend(cluster(troughs, False))
+                    if is_high:
+                        high_pivots.append(i)
+
+                    # Pivot Low
+                    is_low = True
+                    for j in range(i - left, i + right + 1):
+                        if data['low'].iloc[j] < data['low'].iloc[i]:
+                            is_low = False
+                            break
+                    if is_low:
+                        low_pivots.append(i)
+                return high_pivots, low_pivots
+
+            hp_indices, lp_indices = get_pivots(df, self.left_bars, self.right_bars)
+
+            # Map Pivots to Zones
+            for idx in hp_indices:
+                self.resistance_zones[asset].append({
+                    'upper': df['high'].iloc[idx],
+                    'lower': max(df['open'].iloc[idx], df['close'].iloc[idx]),
+                    'vol_osc': df['vol_osc'].iloc[idx] if 'vol_osc' in df else 0
+                })
+
+            for idx in lp_indices:
+                self.support_zones[asset].append({
+                    'lower': df['low'].iloc[idx],
+                    'upper': min(df['open'].iloc[idx], df['close'].iloc[idx]),
+                    'vol_osc': df['vol_osc'].iloc[idx] if 'vol_osc' in df else 0
+                })
+
+            # Keep only unique/significant zones (Cluster if needed, here we just keep recent ones)
+            # Pine script uses the most recent highUsePivot/lowUsePivot
+            self.resistance_zones[asset] = self.resistance_zones[asset][-5:]
+            self.support_zones[asset] = self.support_zones[asset][-5:]
+
             self.last_snr_update[asset] = datetime.now()
             self._report_update()
-        except: pass
+        except Exception as e:
+            logger.error(f"SNR Update Error ({asset}): {e}")
 
     async def monitor_and_trade(self):
         logger.info("Bot logic active.")
