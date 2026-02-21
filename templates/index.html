@@ -1,0 +1,361 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Trusted Spots | 10k Challenge Bot</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/socket.io/4.0.1/socket.io.js"></script>
+    <script src="https://unpkg.com/lucide@latest"></script>
+    <style>
+        @import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap');
+        body { font-family: 'Inter', sans-serif; transition: background-color 0.3s, color 0.3s; }
+        .dark { background-color: #0f172a; color: #f8fafc; }
+        .glass { background: rgba(255, 255, 255, 0.05); backdrop-filter: blur(10px); border: 1px solid rgba(255, 255, 255, 0.1); }
+        .tab-active { border-bottom: 2px solid #3b82f6; color: #3b82f6; }
+        .log-entry { font-family: 'Courier New', Courier, monospace; }
+    </style>
+</head>
+<body class="bg-gray-50 text-slate-900 transition-all duration-300">
+    <div id="app" class="min-h-screen flex flex-col">
+        <!-- Header -->
+        <header class="border-b px-6 py-4 flex items-center justify-between glass sticky top-0 z-50">
+            <div class="flex items-center gap-3">
+                <div class="bg-blue-600 p-2 rounded-lg">
+                    <i data-lucide="trending-up" class="text-white"></i>
+                </div>
+                <div>
+                    <h1 class="font-bold text-xl tracking-tight">TRUSTED SPOTS</h1>
+                    <p class="text-xs opacity-60">10k Compounding Challenge</p>
+                </div>
+            </div>
+
+            <div class="flex items-center gap-6">
+                <div id="status-badge" class="flex items-center gap-2 px-3 py-1 rounded-full bg-slate-200 text-slate-600 text-sm font-medium">
+                    <span class="w-2 h-2 rounded-full bg-slate-400"></span>
+                    DISCONNECTED
+                </div>
+
+                <button id="theme-toggle" class="p-2 rounded-full hover:bg-gray-200 dark:hover:bg-gray-800 transition-colors">
+                    <i data-lucide="sun" id="theme-icon"></i>
+                </button>
+
+                <button id="main-action-btn" class="bg-blue-600 hover:bg-blue-700 text-white px-6 py-2 rounded-lg font-semibold flex items-center gap-2 transition-all shadow-lg shadow-blue-500/20">
+                    <i data-lucide="play" class="w-4 h-4"></i>
+                    START BOT
+                </button>
+            </div>
+        </header>
+
+        <!-- Main Content -->
+        <main class="flex-1 p-6 max-w-7xl mx-auto w-full">
+            <!-- Tabs -->
+            <div class="flex gap-8 border-b mb-8 overflow-x-auto">
+                <button class="tab-btn pb-4 font-medium transition-all tab-active" data-tab="dashboard">Overview</button>
+                <button class="tab-btn pb-4 font-medium transition-all opacity-60 hover:opacity-100" data-tab="market">Market Analysis</button>
+                <button class="tab-btn pb-4 font-medium transition-all opacity-60 hover:opacity-100" data-tab="positions">Active Trades</button>
+                <button class="tab-btn pb-4 font-medium transition-all opacity-60 hover:opacity-100" data-tab="config">Configuration</button>
+                <button class="tab-btn pb-4 font-medium transition-all opacity-60 hover:opacity-100" data-tab="logs">Console</button>
+            </div>
+
+            <!-- Tab Contents -->
+            <section id="tab-dashboard" class="tab-content">
+                <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6 mb-8">
+                    <div class="glass p-6 rounded-2xl border shadow-sm">
+                        <p class="text-sm opacity-60 mb-1">Current Balance</p>
+                        <h2 class="text-3xl font-bold" id="metric-balance">$0.00</h2>
+                    </div>
+                    <div class="glass p-6 rounded-2xl border shadow-sm">
+                        <p class="text-sm opacity-60 mb-1">Today's Profit</p>
+                        <h2 class="text-3xl font-bold text-green-500" id="metric-profit">$0.00</h2>
+                        <p class="text-xs opacity-60 mt-1" id="metric-profit-pct">0% of target</p>
+                    </div>
+                    <div class="glass p-6 rounded-2xl border shadow-sm">
+                        <p class="text-sm opacity-60 mb-1">Trades Today</p>
+                        <h2 class="text-3xl font-bold" id="metric-trades">0 / 5</h2>
+                    </div>
+                    <div class="glass p-6 rounded-2xl border shadow-sm">
+                        <p class="text-sm opacity-60 mb-1">Loss Streak</p>
+                        <h2 class="text-3xl font-bold text-orange-500" id="metric-loss-streak">0 / 3</h2>
+                    </div>
+                </div>
+
+                <div class="grid grid-cols-1 lg:grid-cols-3 gap-6">
+                    <div class="lg:col-span-2 glass rounded-2xl border p-6">
+                        <h3 class="font-bold mb-4 flex items-center gap-2">
+                            <i data-lucide="activity" class="w-4 h-4 text-blue-500"></i>
+                            Performance Chart
+                        </h3>
+                        <div class="h-64 bg-slate-50 dark:bg-slate-900/50 rounded-xl flex items-center justify-center border border-dashed">
+                             <p class="opacity-40 italic">Chart integration placeholder (Plotly/Chart.js)</p>
+                        </div>
+                    </div>
+                    <div class="glass rounded-2xl border p-6">
+                        <h3 class="font-bold mb-4">Compounding Progress</h3>
+                        <div class="space-y-6">
+                            <div>
+                                <div class="flex justify-between text-sm mb-2">
+                                    <span>Milestone: $100</span>
+                                    <span id="milestone-pct">0%</span>
+                                </div>
+                                <div class="w-full bg-slate-200 dark:bg-slate-800 rounded-full h-2">
+                                    <div id="milestone-bar" class="bg-blue-500 h-2 rounded-full transition-all duration-1000" style="width: 0%"></div>
+                                </div>
+                            </div>
+                            <div class="pt-4 border-t opacity-80 text-sm">
+                                <p class="mb-2">Goal: $10,000</p>
+                                <p>Days Estimated: ~27</p>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </section>
+
+            <section id="tab-market" class="tab-content hidden">
+                <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6" id="assets-grid">
+                    <!-- Dynamic Asset Cards -->
+                </div>
+            </section>
+
+            <section id="tab-positions" class="tab-content hidden">
+                <div class="glass rounded-2xl border overflow-hidden">
+                    <table class="w-full text-left">
+                        <thead class="bg-slate-50 dark:bg-slate-900/50 text-sm opacity-70">
+                            <tr>
+                                <th class="px-6 py-4">Asset</th>
+                                <th class="px-6 py-4">Direction</th>
+                                <th class="px-6 py-4">Stake</th>
+                                <th class="px-6 py-4">Open Time</th>
+                                <th class="px-6 py-4">Status</th>
+                            </tr>
+                        </thead>
+                        <tbody id="positions-body">
+                            <!-- Dynamic Positions -->
+                        </tbody>
+                    </table>
+                    <div id="no-positions" class="p-12 text-center opacity-40">
+                        No active trades currently.
+                    </div>
+                </div>
+            </section>
+
+            <section id="tab-config" class="tab-content hidden">
+                <div class="max-w-2xl glass rounded-2xl border p-8 mx-auto">
+                    <h3 class="text-xl font-bold mb-6">Bot Configuration</h3>
+                    <form id="config-form" class="space-y-6">
+                        <div class="grid grid-cols-1 md:grid-cols-2 gap-6">
+                            <div>
+                                <label class="block text-sm font-medium mb-2 opacity-70">Starting Balance ($)</label>
+                                <input type="number" name="start_balance" class="w-full bg-transparent border rounded-lg px-4 py-2 outline-none focus:border-blue-500">
+                            </div>
+                            <div>
+                                <label class="block text-sm font-medium mb-2 opacity-70">Daily Profit Target (%)</label>
+                                <input type="number" step="0.01" name="daily_target_pct" class="w-full bg-transparent border rounded-lg px-4 py-2 outline-none focus:border-blue-500">
+                            </div>
+                            <div>
+                                <label class="block text-sm font-medium mb-2 opacity-70">Max Loss Streak</label>
+                                <input type="number" name="max_losses_streak" class="w-full bg-transparent border rounded-lg px-4 py-2 outline-none focus:border-blue-500">
+                            </div>
+                            <div>
+                                <label class="block text-sm font-medium mb-2 opacity-70">Max Trades/Day</label>
+                                <input type="number" name="max_trades_per_day" class="w-full bg-transparent border rounded-lg px-4 py-2 outline-none focus:border-blue-500">
+                            </div>
+                        </div>
+                        <div>
+                            <label class="block text-sm font-medium mb-2 opacity-70">Pocket Option SSID</label>
+                            <textarea name="POCKET_OPTION_SSID" rows="3" class="w-full bg-transparent border rounded-lg px-4 py-2 outline-none focus:border-blue-500 text-xs font-mono"></textarea>
+                        </div>
+                        <button type="submit" class="w-full bg-blue-600 text-white font-bold py-3 rounded-xl hover:bg-blue-700 transition-all">
+                            SAVE CONFIGURATION
+                        </button>
+                    </form>
+                </div>
+            </section>
+
+            <section id="tab-logs" class="tab-content hidden">
+                <div class="bg-black text-green-500 p-6 rounded-2xl h-[500px] overflow-y-auto font-mono text-sm shadow-2xl border border-slate-800" id="console-output">
+                    <p class="opacity-50 log-entry">> System initialized. Waiting for connection...</p>
+                </div>
+            </section>
+        </main>
+    </div>
+
+    <script>
+        const socket = io();
+        let isRunning = false;
+        let isDark = false;
+
+        // Initialize Lucide icons
+        lucide.createIcons();
+
+        // Theme Toggle
+        const themeBtn = document.getElementById('theme-toggle');
+        const themeIcon = document.getElementById('theme-icon');
+        themeBtn.addEventListener('click', () => {
+            isDark = !isDark;
+            document.body.classList.toggle('dark', isDark);
+            themeIcon.setAttribute('data-lucide', isDark ? 'moon' : 'sun');
+            lucide.createIcons();
+        });
+
+        // Tab Management
+        const tabs = document.querySelectorAll('.tab-btn');
+        const contents = document.querySelectorAll('.tab-content');
+        tabs.forEach(tab => {
+            tab.addEventListener('click', () => {
+                const target = tab.dataset.tab;
+                tabs.forEach(t => t.classList.remove('tab-active', 'opacity-100'));
+                tabs.forEach(t => t.classList.add('opacity-60'));
+                tab.classList.add('tab-active', 'opacity-100');
+                tab.classList.remove('opacity-60');
+
+                contents.forEach(c => c.classList.add('hidden'));
+                document.getElementById(`tab-${target}`).classList.remove('hidden');
+            });
+        });
+
+        // Bot Control
+        const mainBtn = document.getElementById('main-action-btn');
+        const statusBadge = document.getElementById('status-badge');
+
+        async function updateStatus() {
+            const res = await fetch('/api/status');
+            const data = await res.json();
+            isRunning = data.running;
+
+            mainBtn.innerHTML = isRunning ?
+                `<i data-lucide="square" class="w-4 h-4"></i> STOP BOT` :
+                `<i data-lucide="play" class="w-4 h-4"></i> START BOT`;
+            mainBtn.classList.toggle('bg-red-600', isRunning);
+            mainBtn.classList.toggle('hover:bg-red-700', isRunning);
+            mainBtn.classList.toggle('bg-blue-600', !isRunning);
+
+            statusBadge.innerHTML = isRunning ?
+                `<span class="w-2 h-2 rounded-full bg-green-500 animate-pulse"></span> RUNNING` :
+                `<span class="w-2 h-2 rounded-full bg-slate-400"></span> IDLE`;
+            lucide.createIcons();
+        }
+
+        mainBtn.addEventListener('click', async () => {
+            const endpoint = isRunning ? '/api/stop' : '/api/start';
+            await fetch(endpoint, { method: 'POST' });
+            setTimeout(updateStatus, 1000);
+        });
+
+        // Configuration
+        const configForm = document.getElementById('config-form');
+        async function loadConfig() {
+            const res = await fetch('/api/config');
+            const config = await res.json();
+
+            configForm.start_balance.value = config.risk_management.start_balance;
+            configForm.daily_target_pct.value = config.risk_management.daily_target_pct;
+            configForm.max_losses_streak.value = config.risk_management.max_losses_streak;
+            configForm.max_trades_per_day.value = config.risk_management.max_trades_per_day;
+            configForm.POCKET_OPTION_SSID.value = config.POCKET_OPTION_SSID;
+        }
+
+        configForm.addEventListener('submit', async (e) => {
+            e.preventDefault();
+            const formData = new FormData(configForm);
+            const currentConfigRes = await fetch('/api/config');
+            const config = await currentConfigRes.json();
+
+            config.risk_management.start_balance = parseFloat(formData.get('start_balance'));
+            config.risk_management.daily_target_pct = parseFloat(formData.get('daily_target_pct'));
+            config.risk_management.max_losses_streak = parseInt(formData.get('max_losses_streak'));
+            config.risk_management.max_trades_per_day = parseInt(formData.get('max_trades_per_day'));
+            config.POCKET_OPTION_SSID = formData.get('POCKET_OPTION_SSID');
+
+            await fetch('/api/config', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(config)
+            });
+            alert('Configuration saved!');
+        });
+
+        // Socket Events
+        socket.on('bot_update', (data) => {
+            // Metrics
+            document.getElementById('metric-balance').innerText = `$${data.balance.toFixed(2)}`;
+            document.getElementById('metric-profit').innerText = `$${data.profit.toFixed(2)}`;
+            document.getElementById('metric-trades').innerText = `${data.trades_today} / 5`;
+            document.getElementById('metric-loss-streak').innerText = `${data.loss_streak} / 3`;
+
+            const targetAmt = data.day_start_balance * 0.3;
+            const profitPct = Math.min(100, (data.profit / targetAmt) * 100);
+            document.getElementById('metric-profit-pct').innerText = `${profitPct.toFixed(1)}% of target`;
+
+            // Compounding Progress
+            const milestone = 100;
+            const milestonePct = Math.min(100, (data.balance / milestone) * 100);
+            document.getElementById('milestone-pct').innerText = `${milestonePct.toFixed(1)}%`;
+            document.getElementById('milestone-bar').style.width = `${milestonePct}%`;
+
+            // Assets Grid
+            const grid = document.getElementById('assets-grid');
+            grid.innerHTML = '';
+            Object.entries(data.assets).forEach(([symbol, info]) => {
+                if (info.payout < 0.8) return;
+
+                const card = document.createElement('div');
+                card.className = 'glass p-6 rounded-2xl border shadow-sm';
+                card.innerHTML = `
+                    <div class="flex justify-between items-start mb-4">
+                        <h4 class="font-bold">${symbol}</h4>
+                        <span class="bg-green-500/10 text-green-500 text-xs px-2 py-1 rounded-md">${(info.payout * 100).toFixed(0)}% Payout</span>
+                    </div>
+                    <div class="text-2xl font-mono mb-4">${info.price.toFixed(5)}</div>
+                    <div class="space-y-2">
+                        <p class="text-[10px] uppercase opacity-40 font-bold">SNR Zones</p>
+                        ${info.resistance.map(z => `<div class="bg-red-500/10 text-red-500 text-[10px] p-1 rounded border border-red-500/20">RES: ${z.lower.toFixed(5)}-${z.upper.toFixed(5)}</div>`).join('')}
+                        ${info.support.map(z => `<div class="bg-green-500/10 text-green-500 text-[10px] p-1 rounded border border-green-500/20">SUP: ${z.lower.toFixed(5)}-${z.upper.toFixed(5)}</div>`).join('')}
+                    </div>
+                    <div class="mt-4 pt-4 border-t flex justify-between items-center">
+                        <span class="text-xs opacity-60">Status</span>
+                        <span class="text-xs font-bold ${info.state === 'IDLE' ? 'text-blue-500' : 'text-orange-500 animate-pulse'}">${info.state}</span>
+                    </div>
+                `;
+                grid.appendChild(card);
+            });
+
+            // Positions
+            const posBody = document.getElementById('positions-body');
+            const noPos = document.getElementById('no-positions');
+            posBody.innerHTML = '';
+            if (data.open_positions.length > 0) {
+                noPos.classList.add('hidden');
+                data.open_positions.forEach(pos => {
+                    const row = document.createElement('tr');
+                    row.className = 'border-t dark:border-slate-800';
+                    row.innerHTML = `
+                        <td class="px-6 py-4 font-semibold">${pos.asset}</td>
+                        <td class="px-6 py-4"><span class="px-2 py-1 rounded text-xs ${pos.direction === 'call' ? 'bg-green-500/10 text-green-500' : 'bg-red-500/10 text-red-500'}">${pos.direction.toUpperCase()}</span></td>
+                        <td class="px-6 py-4 font-mono">$${pos.stake}</td>
+                        <td class="px-6 py-4 opacity-60">${pos.open_time}</td>
+                        <td class="px-6 py-4"><span class="flex items-center gap-2"><span class="w-2 h-2 rounded-full bg-blue-500 animate-ping"></span> ACTIVE</span></td>
+                    `;
+                    posBody.appendChild(row);
+                });
+            } else {
+                noPos.classList.remove('hidden');
+            }
+        });
+
+        socket.on('log_message', (data) => {
+            const console = document.getElementById('console-output');
+            const entry = document.createElement('p');
+            entry.className = 'log-entry mb-1';
+            entry.innerText = `> ${data.message}`;
+            console.appendChild(entry);
+            console.scrollTop = console.scrollHeight;
+        });
+
+        // Init
+        loadConfig();
+        updateStatus();
+        setInterval(updateStatus, 5000);
+    </script>
+</body>
+</html>

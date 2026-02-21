@@ -2,7 +2,7 @@ import asyncio
 import os
 import time
 from datetime import datetime, timedelta
-from typing import List, Optional, Dict, Set
+from typing import List, Optional, Dict, Set, Callable
 import pandas as pd
 from loguru import logger
 
@@ -10,8 +10,9 @@ from pocketoptionapi_async import AsyncPocketOptionClient, OrderDirection, Order
 from pocketoptionapi_async.models import Candle
 
 class TrustedSpotsBot:
-    def __init__(self, config: Dict):
+    def __init__(self, config: Dict, update_callback: Optional[Callable] = None):
         self.config = config
+        self.update_callback = update_callback
         self.ssid = config.get("POCKET_OPTION_SSID")
         self.assets = config.get("assets", ["EURUSD_otc"])
         self.is_demo = config.get("is_demo", True)
@@ -30,6 +31,7 @@ class TrustedSpotsBot:
         self.current_losses_streak = 0
         self.trades_taken_today = 0
         self.kill_switch_active = False
+        self.stop_event = asyncio.Event()
 
         # Automation Params
         auto_config = config.get("automation", {})
@@ -43,10 +45,34 @@ class TrustedSpotsBot:
         self.asset_payouts: Dict[str, float] = {asset: 0.0 for asset in self.assets}
 
         # Real-time Tracking State
+        self.current_day = datetime.now().date()
         self.asset_states: Dict[str, str] = {asset: "IDLE" for asset in self.assets} # IDLE, TOUCHING, COOLING_DOWN
         self.touch_start_time: Dict[str, float] = {asset: 0.0 for asset in self.assets}
         self.asset_last_price: Dict[str, float] = {asset: 0.0 for asset in self.assets}
         self.cooldown_until: Dict[str, float] = {asset: 0.0 for asset in self.assets}
+        self.open_positions: Dict[str, Dict] = {} # order_id: details
+
+    def _report_update(self):
+        if self.update_callback:
+            data = {
+                "balance": self.current_balance_cached,
+                "day_start_balance": self.day_start_balance,
+                "profit": self.current_balance_cached - self.day_start_balance if self.day_start_balance else 0,
+                "trades_today": self.trades_taken_today,
+                "loss_streak": self.current_losses_streak,
+                "active": not self.kill_switch_active and not self.stop_event.is_set(),
+                "assets": {}
+            }
+            for asset in self.assets:
+                data["assets"][asset] = {
+                    "price": self.asset_last_price.get(asset, 0),
+                    "payout": self.asset_payouts.get(asset, 0),
+                    "state": self.asset_states.get(asset, "IDLE"),
+                    "resistance": self.resistance_zones.get(asset, []),
+                    "support": self.support_zones.get(asset, [])
+                }
+            data["open_positions"] = list(self.open_positions.values())
+            self.update_callback(data)
 
     async def initialize(self):
         # Register Event Callbacks
@@ -64,36 +90,38 @@ class TrustedSpotsBot:
         # Initial SNR Mappings and Subscriptions
         for asset in self.assets:
             await self.update_snr_zones(asset)
-            # Subscribe to 5s stream for high-resolution tick tracking
-            # Note: We use the internal changeSymbol logic
             msg = f'42["changeSymbol", {{"asset": "{asset}", "period": 5}}]'
             await self.client.send_message(msg)
             logger.info(f"Subscribed to 5s stream for {asset}")
-            await asyncio.sleep(0.5) # Avoid spamming the server
+            await asyncio.sleep(0.3)
 
     async def start_new_session(self):
         """Reset daily counters and capture start-of-day balance"""
         balance_info = await self.client.get_balance()
         self.day_start_balance = balance_info.balance
+        self.current_balance_cached = balance_info.balance
         self.trades_taken_today = 0
         self.current_losses_streak = 0
         self.kill_switch_active = False
+        self.stop_event.clear()
         logger.info(f"--- NEW SESSION STARTED ---")
         logger.info(f"Start Balance: ${self.day_start_balance:.2f} | Target: +{self.daily_target_pct:.0%}")
+        self._report_update()
 
     def _on_balance_updated(self, balance_obj):
         self.current_balance_cached = balance_obj.balance
-        # logger.debug(f"Cached balance updated: ${self.current_balance_cached:.2f}")
+        self._report_update()
 
     def _on_payout_update(self, data: Dict):
         symbol = data.get("symbol")
         payout = data.get("payout", 0) / 100.0
         if symbol in self.asset_payouts:
             self.asset_payouts[symbol] = payout
+            self._report_update()
 
     async def _on_stream_update(self, data: Dict):
         """Websocket Event Handler for real-time price ticks"""
-        if self.kill_switch_active:
+        if self.kill_switch_active or self.stop_event.is_set():
             return
 
         asset = data.get("asset")
@@ -124,186 +152,99 @@ class TrustedSpotsBot:
         if state == "IDLE":
             target_dir = self._check_zone_touch(asset, current_price)
             if target_dir:
-                # NEW: Approach & Exhaustion Filter
                 if await self._is_approach_aggressive(asset, target_dir):
-                    logger.info(f"[{asset}] Approach too aggressive (Full Momentum). Skipping.")
-                    self.cooldown_until[asset] = time.time() + 30 # Small cooldown to avoid spam
+                    self.cooldown_until[asset] = time.time() + 30
                     return
 
-                logger.info(f"[{asset}] Zone Touch Detected. Price: {current_price}. Entering TOUCHING state.")
+                logger.info(f"[{asset}] Zone Touch: {current_price}")
                 self.asset_states[asset] = "TOUCHING"
                 self.touch_start_time[asset] = time.time()
                 self.config[f"{asset}_target_dir"] = target_dir
+                self._report_update()
 
         elif state == "TOUCHING":
-            # Check timeout
             if time.time() - self.touch_start_time[asset] > self.rejection_window:
-                logger.info(f"[{asset}] Rejection window timed out. Returning to IDLE.")
                 self.asset_states[asset] = "IDLE"
+                self._report_update()
                 return
 
-            # Check Rejection Confirmation (using the latest stream data)
             target_dir = self.config.get(f"{asset}_target_dir")
             if await self._check_rejection_confirmed(asset, data, target_dir):
-                # EXECUTE TRADE
                 self.asset_states[asset] = "COOLING_DOWN"
-                # Launch trade in background to not block the WS thread
                 asyncio.create_task(self.execute_trade(asset, target_dir))
-                self.cooldown_until[asset] = time.time() + 70 # Wait for trade + buffer
+                self.cooldown_until[asset] = time.time() + 70
+                self._report_update()
 
     async def _is_approach_aggressive(self, asset: str, direction: OrderDirection) -> bool:
-        """Exhaustion Filter: Check if the 1m approach is too strong (momentum) or showing rejection (exhaustion)"""
         try:
             candles = await self.client.get_candles(asset, 60, count=2)
             if len(candles) < 2: return False
-
             last = candles[-1]
             body = abs(last.close - last.open)
             total_range = last.high - last.low if last.high > last.low else 0.0001
-
-            # Pattern 1: Marubozu Check (Avoid entry if approaching candle is solid)
-            # If body is > 80% of total candle and color matches direction of approach
             if (direction == OrderDirection.PUT and last.close > last.open and body/total_range > 0.8) or \
                (direction == OrderDirection.CALL and last.close < last.open and body/total_range > 0.8):
-                return True # Aggressive momentum
-
-            # Pattern 2: Rejection Confirmation (Good entry if approaching candle has a wick)
-            # This is "exhaustion" - price already tried to go through and failed on 1m
-            wick_against = (last.high - max(last.open, last.close)) if direction == OrderDirection.PUT else (min(last.open, last.close) - last.low)
-            if wick_against > (body * 0.5):
-                logger.debug(f"[{asset}] 1m Exhaustion wick detected. High quality setup.")
-                return False # Not aggressive (it's exhausted)
-
+                return True
             return False
-        except Exception as e:
-            logger.error(f"Exhaustion filter error: {e}")
-            return False
+        except: return False
 
     def _check_zone_touch(self, asset: str, price: float) -> Optional[OrderDirection]:
         for zone in self.resistance_zones[asset]:
-            if zone['lower'] <= price <= zone['upper']:
-                return OrderDirection.PUT
+            if zone['lower'] <= price <= zone['upper']: return OrderDirection.PUT
         for zone in self.support_zones[asset]:
-            if zone['lower'] <= price <= zone['upper']:
-                return OrderDirection.CALL
+            if zone['lower'] <= price <= zone['upper']: return OrderDirection.CALL
         return None
 
     async def _check_rejection_confirmed(self, asset: str, stream_data: Dict, direction: OrderDirection) -> bool:
-        """Analyze the stream data for 5s candlestick patterns: Hammer, Shooting Star, Engulfing"""
         candles = self.client._parse_stream_candles(stream_data, asset, 5)
         if len(candles) < 2: return False
-
-        last = candles[-1]
-        prev = candles[-2]
-
-        last_body = abs(last.close - last.open)
-        prev_body = abs(prev.close - prev.open)
+        last, prev = candles[-1], candles[-2]
+        last_body, prev_body = abs(last.close - last.open), abs(prev.close - prev.open)
         last_range = last.high - last.low if last.high > last.low else 0.0001
+        wick_top, wick_bottom = last.high - max(last.open, last.close), min(last.open, last.close) - last.low
 
-        wick_top = last.high - max(last.open, last.close)
-        wick_bottom = min(last.open, last.close) - last.low
-
-        # Pattern 1: Reversal Engulfing (Strong Signal)
-        if direction == OrderDirection.PUT and last.close < last.open and prev.close > prev.open:
-            if last_body > prev_body * 0.8: # Engulfing or near-engulfing
-                logger.info(f"[{asset}] 5s Bearish Engulfing Rejection.")
-                return True
-        if direction == OrderDirection.CALL and last.close > last.open and prev.close < prev.open:
-            if last_body > prev_body * 0.8:
-                logger.info(f"[{asset}] 5s Bullish Engulfing Rejection.")
-                return True
-
-        # Pattern 2: Pin Bar / Hammer / Shooting Star
-        if direction == OrderDirection.PUT and wick_top > last_body * 2:
-            logger.info(f"[{asset}] 5s Shooting Star (Rejection Wick).")
-            return True
-        if direction == OrderDirection.CALL and wick_bottom > last_body * 2:
-            logger.info(f"[{asset}] 5s Hammer (Rejection Wick).")
-            return True
-
-        # Pattern 3: Doji / Stall (Indecision at level)
-        if last_body < last_range * 0.15:
-            logger.info(f"[{asset}] 5s Doji Indecision detected.")
-            return True
-
-        # Invalidation: Breaking Zone with Full Momentum
-        if last_body / last_range > 0.9 and ((direction == OrderDirection.PUT and last.close > last.open) or (direction == OrderDirection.CALL and last.close < last.open)):
-            logger.info(f"[{asset}] Breaking Zone with Momentum. Invalidation.")
-            self.asset_states[asset] = "IDLE"
-            return False
-
+        if direction == OrderDirection.PUT and last.close < last.open and prev.close > prev.open and last_body > prev_body * 0.7: return True
+        if direction == OrderDirection.CALL and last.close > last.open and prev.close < prev.open and last_body > prev_body * 0.7: return True
+        if direction == OrderDirection.PUT and wick_top > last_body * 1.8: return True
+        if direction == OrderDirection.CALL and wick_bottom > last_body * 1.8: return True
+        if last_body < last_range * 0.1: return True
         return False
 
     async def get_stake(self) -> float:
-        """Refined Stake Logic for $10-$10k Challenge:
-        - If balance < $20, use $1 stake (corrected).
-        - If balance >= $20, use 5% compounding stake.
-        """
-        balance_info = await self.client.get_balance()
-        balance = balance_info.balance
-
-        if balance < 20.0:
-            stake = 1.0
-        else:
-            # 5% Compounding Stake
-            stake = round(balance * 0.05, 2)
-
-        # Ensure minimum $1 (Platform rule)
-        return max(1.0, stake)
+        balance = self.current_balance_cached
+        if balance < 20.0: return 1.0
+        return max(1.0, round(balance * 0.05, 2))
 
     async def check_kill_switch(self) -> bool:
-        """Check if session should end based on daily start balance"""
-        balance_info = await self.client.get_balance()
-        current_balance = balance_info.balance
-        profit = current_balance - self.day_start_balance
-
+        profit = self.current_balance_cached - self.day_start_balance
         if profit >= self.day_start_balance * self.daily_target_pct:
-            logger.success(f"DAILY GOAL MET: +${profit:.2f} (>= 30%). Kill Switch ON.")
+            logger.success(f"GOAL MET: +${profit:.2f}. Kill Switch ON.")
             self.kill_switch_active = True
+            self._report_update()
             return True
         if self.current_losses_streak >= self.max_losses_streak:
-            logger.warning(f"LOSS LIMIT HIT: {self.current_losses_streak} losses. Kill Switch ON.")
+            logger.warning(f"LOSS LIMIT: {self.current_losses_streak} losses. Kill Switch ON.")
             self.kill_switch_active = True
+            self._report_update()
             return True
         if self.trades_taken_today >= self.max_trades_per_day:
-            logger.info(f"TRADE LIMIT REACHED: {self.trades_taken_today} trades. Kill Switch ON.")
+            logger.info(f"TRADE LIMIT: {self.trades_taken_today} trades. Kill Switch ON.")
             self.kill_switch_active = True
+            self._report_update()
             return True
         return False
 
     async def update_snr_zones(self, asset: str):
-        """Fetch 1m candles and identify zones"""
-        logger.info(f"Remapping SNR for {asset}...")
         try:
             candles = await self.client.get_candles(asset, 60, count=100)
-            if not candles:
-                return
-
-            self.resistance_zones[asset] = []
-            self.support_zones[asset] = []
-
-            df = pd.DataFrame([{
-                'high': c.high, 'low': c.low,
-                'open': c.open, 'close': c.close
-            } for c in candles])
-
-            # Extreme Levels
-            res_idx = df['high'].idxmax()
-            sup_idx = df['low'].idxmin()
-
-            self.resistance_zones[asset].append({
-                'upper': df['high'].iloc[res_idx],
-                'lower': max(df['open'].iloc[res_idx], df['close'].iloc[res_idx])
-            })
-            self.support_zones[asset].append({
-                'lower': df['low'].iloc[sup_idx],
-                'upper': min(df['open'].iloc[sup_idx], df['close'].iloc[sup_idx])
-            })
-
-            # Pivot Points (Rejections)
+            if not candles: return
+            self.resistance_zones[asset], self.support_zones[asset] = [], []
+            df = pd.DataFrame([{'high': c.high, 'low': c.low, 'open': c.open, 'close': c.close} for c in candles])
+            res_idx, sup_idx = df['high'].idxmax(), df['low'].idxmin()
+            self.resistance_zones[asset].append({'upper': df['high'].iloc[res_idx], 'lower': max(df['open'].iloc[res_idx], df['close'].iloc[res_idx])})
+            self.support_zones[asset].append({'lower': df['low'].iloc[sup_idx], 'upper': min(df['open'].iloc[sup_idx], df['close'].iloc[sup_idx])})
             peaks = df[(df['high'] == df['high'].rolling(10, center=True).max())]
             troughs = df[(df['low'] == df['low'].rolling(10, center=True).min())]
-
             def cluster(levels, is_res=True):
                 zones = []
                 for _, row in levels.iterrows():
@@ -318,49 +259,64 @@ class TrustedSpotsBot:
                         if is_res: zones.append({'upper': row['high'], 'lower': max(row['open'], row['close']), 'ref': row['high'], 'count': 1})
                         else: zones.append({'lower': row['low'], 'upper': min(row['open'], row['close']), 'ref': row['low'], 'count': 1})
                 return [z for z in zones if z['count'] >= 2]
-
             self.resistance_zones[asset].extend(cluster(peaks, True))
             self.support_zones[asset].extend(cluster(troughs, False))
             self.last_snr_update[asset] = datetime.now()
-        except Exception as e:
-            logger.error(f"Failed to update SNR for {asset}: {e}")
+            self._report_update()
+        except: pass
 
     async def monitor_and_trade(self):
-        """Background maintenance loop (SNR updates and Kill Switch checks)"""
-        logger.info("Bot is running in event-driven mode.")
-        while not self.kill_switch_active:
+        logger.info("Bot logic active.")
+        while not self.stop_event.is_set():
             try:
-                # 1. Periodic SNR Refresh
+                # Daily Reset Check
+                if datetime.now().date() > self.current_day:
+                    logger.info("New day detected. Resetting session...")
+                    await self.start_new_session()
+                    self.current_day = datetime.now().date()
+
+                if self.kill_switch_active:
+                    await asyncio.sleep(60)
+                    continue
+
                 for asset in self.assets:
                     if datetime.now() - self.last_snr_update[asset] > timedelta(minutes=self.snr_update_interval):
                         await self.update_snr_zones(asset)
-
-                # 2. Kill Switch Check
-                if await self.check_kill_switch():
-                    break
-
-                await asyncio.sleep(30) # Maintenance check every 30s
+                if await self.check_kill_switch(): break
+                await asyncio.sleep(10)
+                self._report_update()
             except Exception as e:
-                logger.error(f"Error in background maintenance: {e}")
+                logger.error(f"Maintenance error: {e}")
                 await asyncio.sleep(5)
+        logger.info("Bot logic stopped.")
+        self._report_update()
 
     async def execute_trade(self, asset: str, direction: OrderDirection):
         stake = await self.get_stake()
-        logger.warning(f"PLACING TRADE: {asset} {direction.value} | Stake: ${stake}")
-
         try:
             order = await self.client.place_order(asset, stake, direction, 60)
-            result = await self.client.check_win(order.order_id)
+            order_id = order.order_id
+            self.open_positions[order_id] = {
+                "order_id": order_id, "asset": asset, "direction": direction.value,
+                "stake": stake, "open_time": datetime.now().strftime("%H:%M:%S")
+            }
+            self._report_update()
+            result = await self.client.check_win(order_id)
             if result:
                 status = result.get('status')
-                logger.success(f"TRADE COMPLETED: {asset} result is {status}")
                 self.trades_taken_today += 1
-                if status == 'win':
-                    self.current_losses_streak = 0
-                else:
-                    self.current_losses_streak += 1
+                if status == 'win': self.current_losses_streak = 0
+                else: self.current_losses_streak += 1
+            if order_id in self.open_positions: del self.open_positions[order_id]
+            self._report_update()
         except Exception as e:
-            logger.error(f"Trade execution failed on {asset}: {e}")
-        finally:
-            # Ensure asset returns to IDLE after cooldown is handled in WS stream
-            self.asset_states[asset] = "IDLE"
+            logger.error(f"Trade failed: {e}")
+            if 'order_id' in locals() and order_id in self.open_positions: del self.open_positions[order_id]
+            self._report_update()
+
+    async def stop(self):
+        self.stop_event.set()
+        if self.client.is_connected:
+            await self.client.disconnect()
+        logger.info("Bot disconnected.")
+        self._report_update()

@@ -1,0 +1,9 @@
+flask
+flask-socketio
+gevent
+gevent-websocket
+loguru
+pandas
+websockets==11.0
+pydantic
+loguru
