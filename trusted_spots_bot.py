@@ -20,7 +20,8 @@ class TrustedSpotsBot:
 
         # Risk Management State
         rm_config = config.get("risk_management", {})
-        self.start_balance = 0.0
+        self.day_start_balance = 0.0
+        self.current_balance_cached = 0.0
         self.daily_target_pct = rm_config.get("daily_target_pct", 0.30)
         self.max_losses_streak = rm_config.get("max_losses_streak", 3)
         self.max_trades_per_day = rm_config.get("max_trades_per_day", 5)
@@ -51,16 +52,14 @@ class TrustedSpotsBot:
         # Register Event Callbacks
         self.client.add_event_callback("payout_update", self._on_payout_update)
         self.client.add_event_callback("stream_update", self._on_stream_update)
+        self.client.add_event_callback("balance_updated", self._on_balance_updated)
 
         # Connect to PO
         connected = await self.client.connect()
         if not connected:
             raise ConnectionError("Failed to connect to PocketOption.")
 
-        # Initial Balance
-        balance_info = await self.client.get_balance()
-        self.start_balance = balance_info.balance
-        logger.info(f"Bot initialized. Start Balance: ${self.start_balance:.2f}")
+        await self.start_new_session()
 
         # Initial SNR Mappings and Subscriptions
         for asset in self.assets:
@@ -71,6 +70,20 @@ class TrustedSpotsBot:
             await self.client.send_message(msg)
             logger.info(f"Subscribed to 5s stream for {asset}")
             await asyncio.sleep(0.5) # Avoid spamming the server
+
+    async def start_new_session(self):
+        """Reset daily counters and capture start-of-day balance"""
+        balance_info = await self.client.get_balance()
+        self.day_start_balance = balance_info.balance
+        self.trades_taken_today = 0
+        self.current_losses_streak = 0
+        self.kill_switch_active = False
+        logger.info(f"--- NEW SESSION STARTED ---")
+        logger.info(f"Start Balance: ${self.day_start_balance:.2f} | Target: +{self.daily_target_pct:.0%}")
+
+    def _on_balance_updated(self, balance_obj):
+        self.current_balance_cached = balance_obj.balance
+        # logger.debug(f"Cached balance updated: ${self.current_balance_cached:.2f}")
 
     def _on_payout_update(self, data: Dict):
         symbol = data.get("symbol")
@@ -222,19 +235,30 @@ class TrustedSpotsBot:
         return False
 
     async def get_stake(self) -> float:
+        """Refined Stake Logic for $10-$10k Challenge:
+        - If balance < $20, use $2 stake (as requested).
+        - If balance >= $20, use 5% compounding stake.
+        """
         balance_info = await self.client.get_balance()
         balance = balance_info.balance
+
         if balance < 20.0:
-            return 1.0
-        return round(balance * 0.05, 2)
+            stake = 2.0
+        else:
+            # 5% Compounding Stake
+            stake = round(balance * 0.05, 2)
+
+        # Ensure minimum $1 (Platform rule)
+        return max(1.0, stake)
 
     async def check_kill_switch(self) -> bool:
+        """Check if session should end based on daily start balance"""
         balance_info = await self.client.get_balance()
         current_balance = balance_info.balance
-        profit = current_balance - self.start_balance
+        profit = current_balance - self.day_start_balance
 
-        if profit >= self.start_balance * self.daily_target_pct:
-            logger.success(f"DAILY GOAL MET: +${profit:.2f}. Kill Switch ON.")
+        if profit >= self.day_start_balance * self.daily_target_pct:
+            logger.success(f"DAILY GOAL MET: +${profit:.2f} (>= 30%). Kill Switch ON.")
             self.kill_switch_active = True
             return True
         if self.current_losses_streak >= self.max_losses_streak:
