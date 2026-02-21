@@ -80,6 +80,11 @@ The strategy relies on a strict **Kill Switch Strategy** to survive the compound
 - **Lesson 4**: Consistency comes from doing the same thing every day. He replicates the same process in every video of the challenge.
 
 ## 10. Bot Automation Logic (Developer Spec)
+These technical parameters control the bot's precision:
+- **`snr_update_interval_mins`**: How often (in minutes) the bot recalculates Support and Resistance zones. This ensures the bot follows the shifting market structure.
+- **`rejection_monitor_seconds`**: The maximum time the bot spends in the 5-second "Confirmation" phase. If a micro-rejection isn't detected within this window after touching a zone, the trade is discarded.
+
+### 10.1 Logic Flow
 If you are building a bot for this strategy, follow this logic flow:
 1. **Filter**: Identify 1m candles meeting the 5 "Trusted Spot" criteria.
 2. **Zone Mapping**: Create a rectangle between `High` and `Max(Open, Close)` for Resistance, or `Low` and `Min(Open, Close)` for Support.

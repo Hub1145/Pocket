@@ -16,7 +16,7 @@
         "start_balance": 10.0,
         "daily_target_pct": 0.30,
         "max_losses_streak": 3,
-        "max_trades_per_day": 6,
+        "max_trades_per_day": 5,
         "compounding_goal": 10000.0,
         "min_payout_pct": 0.80
     },
