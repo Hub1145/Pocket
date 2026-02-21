@@ -24,12 +24,19 @@ To automate this, the SNR should be defined as a **Zone** rather than a single l
 - *Logic*: The zone represents the area of "Price Rejection." If price enters this zone, it is "in the spot."
 
 ## 3. The "Candlestick Story" Analysis
-Before entering, "Trusted Spots" teaches reading the "story" told by the candles:
-1. **The Approach**: How is the price reaching the level?
-   - *Good*: Slowing down, smaller bodies, increasing wicks (Sign of exhaustion).
-   - *Bad*: Large, solid candles with no wicks (Strong momentum, likely to break through).
-2. **Exhaustion Signs**: Look for "Doji" or "Spinning Top" candles as the price touches the SNR. This shows the dominant force (buyers or sellers) is losing control.
-3. **The Trap**: If a candle breaks a level slightly and then pulls back (forming a long wick), it is often a "False Breakout" or "Liquidity Grab," which is a high-probability reversal signal.
+Before entering, "Trusted Spots" teaches reading the "story" told by the candles to identify high-probability setups:
+
+### 3.1 Approach & Exhaustion (1m Filter)
+The bot analyzes the 1-minute candles leading into the zone to filter out "Knife Catching":
+1. **Aggressive Approach (Avoid)**: If the 1m candle is a **Marubozu** (large solid body, no wicks) hitting the SNR, it indicates high momentum. **Do not trade** the first touch; wait for a breakout or a massive rejection.
+2. **Exhausted Approach (Ideal)**: If the 1m candles are getting smaller (**Decreasing Body Size**) and showing wicks in the direction of the SNR, the move is exhausted.
+3. **The Trap (Liquidity Grab)**: A candle that briefly breaks the level but closes back inside with a long wick is a prime signal.
+
+### 3.2 Key Candlestick Patterns
+The bot specifically looks for these shapes at the SNR:
+- **Hammer / Shooting Star**: A small body with a wick at least **2x the body size** pointing into the SNR. This shows the level has been tested and rejected.
+- **Engulfing**: An opposite-colored candle that completely covers the previous candle's body, indicating a shift in power.
+- **Doji / Spinning Top**: Tiny bodies showing market indecision. When this happens at a "Trusted Spot," it usually precedes a reversal.
 
 ## 4. Multi-Timeframe Confirmation (1m/5s)
 The core of the execution is the **Micro-Rejection** technique:
@@ -89,11 +96,13 @@ If you are building a bot for this strategy, follow this logic flow:
 1. **Filter**: Identify 1m candles meeting the 5 "Trusted Spot" criteria.
 2. **Zone Mapping**: Create a rectangle between `High` and `Max(Open, Close)` for Resistance, or `Low` and `Min(Open, Close)` for Support.
 3. **Trigger**: When `Price_Current` enters the Zone on the 1m chart.
-4. **Validation (5s Stream)**:
+4. **Exhaustion Filter (1m)**: Check the last candle. If it is a Marubozu (Body/Range > 0.8) in the direction of the SNR, **ABORT**.
+5. **Validation (5s Stream)**:
    - Start 5s interval check.
-   - If a 5s candle closes **inside** the zone or shows a **rejection wick** (Wick > 50% of candle body) -> **SIGNAL BUY/SELL**.
-   - If a 5s candle closes **outside** the zone with a body > 80% of total length (Full Momentum) -> **WAIT/CANCEL**.
-5. **Trade**: 1 Minute Expiry in the opposite direction of the Approach.
+   - **Signal Rejection**: If 5s candle shows Engulfing, Hammer, or Doji **within** the zone.
+   - **Signal Spike**: If 5s candle wicks through the zone by 1.5x body size.
+   - **Invalidate**: If 5s candle closes **outside** the zone with full momentum.
+6. **Trade**: 1 Minute Expiry in the opposite direction of the Approach.
 6. **Account Scaling (Bot Stake)**:
    - If `Balance` < $20: `Stake` = $1 (Minimum).
    - If `Balance` >= $20: `Stake` = `Balance * 0.05` (5% risk).

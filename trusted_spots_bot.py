@@ -87,43 +87,39 @@ class TrustedSpotsBot:
         if asset not in self.assets:
             return
 
-        # Period check (we subscribed to 5s)
-        # PocketOption stream updates can contain multiple candles or a single tick
         candles_data = data.get("data") or data.get("candles") or []
         if not candles_data:
             return
 
-        # Get latest tick/candle from the stream
-        # Format can be [time, open, close, high, low] or dict
         last_item = candles_data[-1]
         current_price = 0.0
         if isinstance(last_item, dict):
             current_price = float(last_item.get("close", 0))
         elif isinstance(last_item, (list, tuple)) and len(last_item) >= 3:
-            current_price = float(last_item[2]) # Close is at index 2
+            current_price = float(last_item[2])
 
         self.asset_last_price[asset] = current_price
 
-        # Logic Flow:
-        # 1. Payout Check
         if self.asset_payouts.get(asset, 0) < self.min_payout:
             return
 
-        # 2. Cooldown Check
         if time.time() < self.cooldown_until[asset]:
             return
 
-        # 3. State Management
         state = self.asset_states[asset]
 
         if state == "IDLE":
-            # Look for SNR Zone Touch
             target_dir = self._check_zone_touch(asset, current_price)
             if target_dir:
+                # NEW: Approach & Exhaustion Filter
+                if await self._is_approach_aggressive(asset, target_dir):
+                    logger.info(f"[{asset}] Approach too aggressive (Full Momentum). Skipping.")
+                    self.cooldown_until[asset] = time.time() + 30 # Small cooldown to avoid spam
+                    return
+
                 logger.info(f"[{asset}] Zone Touch Detected. Price: {current_price}. Entering TOUCHING state.")
                 self.asset_states[asset] = "TOUCHING"
                 self.touch_start_time[asset] = time.time()
-                # Store the direction we are looking for (CALL at support, PUT at resistance)
                 self.config[f"{asset}_target_dir"] = target_dir
 
         elif state == "TOUCHING":
@@ -142,50 +138,84 @@ class TrustedSpotsBot:
                 asyncio.create_task(self.execute_trade(asset, target_dir))
                 self.cooldown_until[asset] = time.time() + 70 # Wait for trade + buffer
 
+    async def _is_approach_aggressive(self, asset: str, direction: OrderDirection) -> bool:
+        """Exhaustion Filter: Check if the 1m approach is too strong (momentum) or showing rejection (exhaustion)"""
+        try:
+            candles = await self.client.get_candles(asset, 60, count=2)
+            if len(candles) < 2: return False
+
+            last = candles[-1]
+            body = abs(last.close - last.open)
+            total_range = last.high - last.low if last.high > last.low else 0.0001
+
+            # Pattern 1: Marubozu Check (Avoid entry if approaching candle is solid)
+            # If body is > 80% of total candle and color matches direction of approach
+            if (direction == OrderDirection.PUT and last.close > last.open and body/total_range > 0.8) or \
+               (direction == OrderDirection.CALL and last.close < last.open and body/total_range > 0.8):
+                return True # Aggressive momentum
+
+            # Pattern 2: Rejection Confirmation (Good entry if approaching candle has a wick)
+            # This is "exhaustion" - price already tried to go through and failed on 1m
+            wick_against = (last.high - max(last.open, last.close)) if direction == OrderDirection.PUT else (min(last.open, last.close) - last.low)
+            if wick_against > (body * 0.5):
+                logger.debug(f"[{asset}] 1m Exhaustion wick detected. High quality setup.")
+                return False # Not aggressive (it's exhausted)
+
+            return False
+        except Exception as e:
+            logger.error(f"Exhaustion filter error: {e}")
+            return False
+
     def _check_zone_touch(self, asset: str, price: float) -> Optional[OrderDirection]:
-        # Check Resistance
         for zone in self.resistance_zones[asset]:
             if zone['lower'] <= price <= zone['upper']:
                 return OrderDirection.PUT
-        # Check Support
         for zone in self.support_zones[asset]:
             if zone['lower'] <= price <= zone['upper']:
                 return OrderDirection.CALL
         return None
 
     async def _check_rejection_confirmed(self, asset: str, stream_data: Dict, direction: OrderDirection) -> bool:
-        """Analyze the stream data for a rejection pattern"""
-        # stream_data contains the latest 5s candles
+        """Analyze the stream data for 5s candlestick patterns: Hammer, Shooting Star, Engulfing"""
         candles = self.client._parse_stream_candles(stream_data, asset, 5)
-        if len(candles) < 2:
-            return False
+        if len(candles) < 2: return False
 
         last = candles[-1]
         prev = candles[-2]
-        body = abs(last.close - last.open)
+
+        last_body = abs(last.close - last.open)
+        prev_body = abs(prev.close - prev.open)
+        last_range = last.high - last.low if last.high > last.low else 0.0001
+
         wick_top = last.high - max(last.open, last.close)
         wick_bottom = min(last.open, last.close) - last.low
-        total_size = last.high - last.low if last.high > last.low else 0.0001
 
-        # 1. Opposite Move (Fast Rejection)
+        # Pattern 1: Reversal Engulfing (Strong Signal)
         if direction == OrderDirection.PUT and last.close < last.open and prev.close > prev.open:
-            logger.info(f"[{asset}] 5s Bearish Rejection confirmed.")
-            return True
+            if last_body > prev_body * 0.8: # Engulfing or near-engulfing
+                logger.info(f"[{asset}] 5s Bearish Engulfing Rejection.")
+                return True
         if direction == OrderDirection.CALL and last.close > last.open and prev.close < prev.open:
-            logger.info(f"[{asset}] 5s Bullish Rejection confirmed.")
+            if last_body > prev_body * 0.8:
+                logger.info(f"[{asset}] 5s Bullish Engulfing Rejection.")
+                return True
+
+        # Pattern 2: Pin Bar / Hammer / Shooting Star
+        if direction == OrderDirection.PUT and wick_top > last_body * 2:
+            logger.info(f"[{asset}] 5s Shooting Star (Rejection Wick).")
+            return True
+        if direction == OrderDirection.CALL and wick_bottom > last_body * 2:
+            logger.info(f"[{asset}] 5s Hammer (Rejection Wick).")
             return True
 
-        # 2. Long Wick (Spike & Pull)
-        if direction == OrderDirection.PUT and wick_top > body * 1.5:
-            logger.info(f"[{asset}] 5s Upper Wick Rejection confirmed.")
-            return True
-        if direction == OrderDirection.CALL and wick_bottom > body * 1.5:
-            logger.info(f"[{asset}] 5s Lower Wick Rejection confirmed.")
+        # Pattern 3: Doji / Stall (Indecision at level)
+        if last_body < last_range * 0.15:
+            logger.info(f"[{asset}] 5s Doji Indecision detected.")
             return True
 
-        # 3. Momentum Check (Invalidation)
-        if body / total_size > 0.9 and ((direction == OrderDirection.PUT and last.close > last.open) or (direction == OrderDirection.CALL and last.close < last.open)):
-            logger.info(f"[{asset}] Strong momentum detected. Setup invalidated.")
+        # Invalidation: Breaking Zone with Full Momentum
+        if last_body / last_range > 0.9 and ((direction == OrderDirection.PUT and last.close > last.open) or (direction == OrderDirection.CALL and last.close < last.open)):
+            logger.info(f"[{asset}] Breaking Zone with Momentum. Invalidation.")
             self.asset_states[asset] = "IDLE"
             return False
 
