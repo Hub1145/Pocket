@@ -13,7 +13,7 @@ class TrustedSpotsBot:
     def __init__(self, config: Dict):
         self.config = config
         self.ssid = config.get("POCKET_OPTION_SSID")
-        self.asset = config.get("asset", "EURUSD_otc")
+        self.assets = config.get("assets", ["EURUSD_otc"])
         self.is_demo = config.get("is_demo", True)
 
         self.client = AsyncPocketOptionClient(self.ssid, is_demo=self.is_demo)
@@ -24,6 +24,7 @@ class TrustedSpotsBot:
         self.daily_target_pct = rm_config.get("daily_target_pct", 0.15)
         self.max_losses_streak = rm_config.get("max_losses_streak", 2)
         self.max_trades_per_day = rm_config.get("max_trades_per_day", 3)
+        self.min_payout = rm_config.get("min_payout_pct", 0.80)
 
         self.current_losses_streak = 0
         self.trades_taken_today = 0
@@ -33,19 +34,27 @@ class TrustedSpotsBot:
         self.snr_update_interval = auto_config.get("snr_update_interval_mins", 15)
         self.rejection_window = auto_config.get("rejection_monitor_seconds", 30)
 
-        # SNR Zones
-        self.resistance_zones = []
-        self.support_zones = []
-
-        # Market Data
-        self.latest_1m_candles = []
-        self.latest_5s_candles = []
+        # State
+        self.resistance_zones: Dict[str, List[Dict]] = {asset: [] for asset in self.assets}
+        self.support_zones: Dict[str, List[Dict]] = {asset: [] for asset in self.assets}
+        self.last_snr_update: Dict[str, datetime] = {asset: datetime.min for asset in self.assets}
+        self.asset_payouts: Dict[str, float] = {asset: 0.0 for asset in self.assets}
 
     async def initialize(self):
+        # Register payout handler
+        self.client.add_event_callback("payout_update", self._on_payout_update)
+
         await self.client.connect()
         balance_info = await self.client.get_balance()
         self.start_balance = balance_info.balance
-        logger.info(f"Bot initialized. Start Balance: ${self.start_balance:.2f} on {self.asset}")
+        logger.info(f"Bot initialized. Start Balance: ${self.start_balance:.2f} on {len(self.assets)} assets.")
+
+    def _on_payout_update(self, data: Dict):
+        symbol = data.get("symbol")
+        payout = data.get("payout", 0) / 100.0 # Convert to decimal (e.g. 92 -> 0.92)
+        if symbol in self.asset_payouts:
+            self.asset_payouts[symbol] = payout
+            # logger.debug(f"Updated payout for {symbol}: {payout:.0%}")
 
     async def get_stake(self) -> float:
         balance_info = await self.client.get_balance()
@@ -55,39 +64,30 @@ class TrustedSpotsBot:
         return round(balance * 0.05, 2)
 
     async def check_kill_switch(self) -> bool:
-        """Check if today's session should end ($10 to $10k Challenge Rules)"""
         balance_info = await self.client.get_balance()
         current_balance = balance_info.balance
-
         profit = current_balance - self.start_balance
 
-        # 1. Daily Target (15%)
         if profit >= self.start_balance * self.daily_target_pct:
-            logger.success(f"GOAL REACHED! Today's Profit: ${profit:.2f} (>= 15%). Kill Switch ON.")
+            logger.success(f"GOAL REACHED! Profit: ${profit:.2f}. Kill Switch ON.")
             return True
-
-        # 2. Daily Loss Limit (2 consecutive losses)
         if self.current_losses_streak >= self.max_losses_streak:
-            logger.warning(f"STOP LOSS! {self.current_losses_streak} consecutive losses. Kill Switch ON.")
+            logger.warning(f"STOP LOSS! {self.current_losses_streak} losses. Kill Switch ON.")
             return True
-
-        # 3. Max Trade Limit (3 trades)
         if self.trades_taken_today >= self.max_trades_per_day:
-            logger.info(f"SESSION COMPLETE! {self.trades_taken_today} trades taken. Kill Switch ON.")
+            logger.info(f"MAX TRADES ({self.trades_taken_today}) reached. Kill Switch ON.")
             return True
-
         return False
 
-    async def update_snr_zones(self):
+    async def update_snr_zones(self, asset: str):
         """Identify 'Trusted Spots' on 1m chart based on 5 criteria"""
-        logger.info("Updating SNR zones...")
-        # Get more candles to find 'Extreme' levels and 'Series of rejections'
-        candles = await self.client.get_candles(self.asset, 60, count=100)
+        logger.info(f"Updating SNR zones for {asset}...")
+        candles = await self.client.get_candles(asset, 60, count=100)
         if not candles:
             return
 
-        self.resistance_zones = []
-        self.support_zones = []
+        self.resistance_zones[asset] = []
+        self.support_zones[asset] = []
 
         df = pd.DataFrame([{
             'high': c.high, 'low': c.low,
@@ -95,194 +95,150 @@ class TrustedSpotsBot:
             'timestamp': c.timestamp
         } for c in candles])
 
-        # 1. Extreme Levels (highest/lowest in 100 candles)
+        # 1. Extreme Levels
         max_high = df['high'].max()
         min_low = df['low'].min()
-
-        # Find defining candles for extremes
         res_idx = df['high'].idxmax()
         sup_idx = df['low'].idxmin()
 
-        # Resistance zone for max high
-        self.resistance_zones.append({
+        self.resistance_zones[asset].append({
             'upper': max_high,
             'lower': max(df['open'].iloc[res_idx], df['close'].iloc[res_idx]),
             'is_extreme': True
         })
-
-        # Support zone for min low
-        self.support_zones.append({
+        self.support_zones[asset].append({
             'lower': min_low,
             'upper': min(df['open'].iloc[sup_idx], df['close'].iloc[sup_idx]),
             'is_extreme': True
         })
 
-        # 2. Series of Rejections & Obviousness
-        # Find pivots/peaks with at least 2 touches
+        # 2. Series of Rejections
         peaks = df[(df['high'] == df['high'].rolling(10, center=True).max())]
         troughs = df[(df['low'] == df['low'].rolling(10, center=True).min())]
 
-        # Group close levels into zones
         def cluster_zones(levels, is_res=True):
             zones = []
             for idx, row in levels.iterrows():
                 level_val = row['high'] if is_res else row['low']
-                # Check if this level is near an existing zone
                 found = False
                 for zone in zones:
-                    if abs(zone['ref_level'] - level_val) / level_val < 0.0005: # 0.05% tolerance
+                    if abs(zone['ref_level'] - level_val) / level_val < 0.0005:
                         zone['touches'] += 1
                         found = True
                         break
                 if not found:
                     if is_res:
-                        zones.append({
-                            'upper': row['high'],
-                            'lower': max(row['open'], row['close']),
-                            'ref_level': row['high'],
-                            'touches': 1
-                        })
+                        zones.append({'upper': row['high'], 'lower': max(row['open'], row['close']), 'ref_level': row['high'], 'touches': 1})
                     else:
-                        zones.append({
-                            'lower': row['low'],
-                            'upper': min(row['open'], row['close']),
-                            'ref_level': row['low'],
-                            'touches': 1
-                        })
-            return [z for z in zones if z['touches'] >= 2] # Require at least 2 touches for 'Trusted'
+                        zones.append({'lower': row['low'], 'upper': min(row['open'], row['close']), 'ref_level': row['low'], 'touches': 1})
+            return [z for z in zones if z['touches'] >= 2]
 
-        self.resistance_zones.extend(cluster_zones(peaks, is_res=True))
-        self.support_zones.extend(cluster_zones(troughs, is_res=False))
-
-        logger.info(f"Updated: {len(self.resistance_zones)} Res Zones, {len(self.support_zones)} Sup Zones.")
+        self.resistance_zones[asset].extend(cluster_zones(peaks, is_res=True))
+        self.support_zones[asset].extend(cluster_zones(troughs, is_res=False))
+        self.last_snr_update[asset] = datetime.now()
 
     async def monitor_and_trade(self):
-        """Main coordination loop for SNR detection and trade execution"""
-        logger.info(f"Starting monitoring loop for {self.asset}...")
+        logger.info(f"Monitoring {len(self.assets)} assets with min {self.min_payout:.0%} payout...")
 
         while True:
             try:
                 if await self.check_kill_switch():
-                    logger.info("Session goals/limits met. Stopping bot.")
                     break
 
-                # 1. Periodically refresh SNR zones
-                now = datetime.now()
-                if not self.resistance_zones or now.minute % self.snr_update_interval == 0:
-                    await self.update_snr_zones()
+                for asset in self.assets:
+                    # 1. Payout Check
+                    payout = self.asset_payouts.get(asset, 0)
+                    if payout < self.min_payout:
+                        # logger.debug(f"Skipping {asset}: Payout {payout:.0%} too low.")
+                        continue
 
-                # 2. Monitor 1-minute price for zone entry
-                # We use a fast candle check or tick data if available
-                latest_candles = await self.client.get_candles(self.asset, 60, count=1)
-                if not latest_candles:
-                    await asyncio.sleep(1)
-                    continue
+                    # 2. SNR Update Check
+                    if datetime.now() - self.last_snr_update[asset] > timedelta(minutes=self.snr_update_interval):
+                        await self.update_snr_zones(asset)
 
-                current_price = latest_candles[-1].close
+                    # 3. Price Entry Detection
+                    latest_candles = await self.client.get_candles(asset, 60, count=1)
+                    if not latest_candles:
+                        continue
+                    current_price = latest_candles[-1].close
 
-                # 3. Detection & Execution
-                target_direction = None
-
-                # Check Resistance Zones
-                for zone in self.resistance_zones:
-                    if zone['lower'] <= current_price <= zone['upper']:
-                        logger.info(f"TARGET DETECTED: Price in Resistance Zone {zone['lower']}-{zone['upper']}")
-                        target_direction = OrderDirection.PUT
-                        break
-
-                # Check Support Zones (only if not already targeting resistance)
-                if not target_direction:
-                    for zone in self.support_zones:
+                    target_direction = None
+                    for zone in self.resistance_zones[asset]:
                         if zone['lower'] <= current_price <= zone['upper']:
-                            logger.info(f"TARGET DETECTED: Price in Support Zone {zone['lower']}-{zone['upper']}")
-                            target_direction = OrderDirection.CALL
+                            logger.info(f"[{asset}] Resistance Zone Touch @ {current_price}")
+                            target_direction = OrderDirection.PUT
                             break
 
-                if target_direction:
-                    # 4. Multi-Timeframe Confirmation (5s)
-                    confirmed = await self.confirm_5s_rejection(target_direction)
-                    if confirmed:
-                        # 5. Final Execution
-                        await self.execute_trade(target_direction)
-                        # Mandatory cooldown (wait for trade to finish + gap)
-                        logger.info("Trade session cooling down...")
-                        await asyncio.sleep(70)
+                    if not target_direction:
+                        for zone in self.support_zones[asset]:
+                            if zone['lower'] <= current_price <= zone['upper']:
+                                logger.info(f"[{asset}] Support Zone Touch @ {current_price}")
+                                target_direction = OrderDirection.CALL
+                                break
 
-                await asyncio.sleep(2) # Small delay between price checks
+                    if target_direction:
+                        # 4. Multi-Timeframe Confirmation (5s)
+                        if await self.confirm_5s_rejection(asset, target_direction):
+                            await self.execute_trade(asset, target_direction)
+                            logger.info("Session cooling down...")
+                            await asyncio.sleep(70)
+                            break # Re-evaluate balance and kill switch
+
+                await asyncio.sleep(1)
 
             except Exception as e:
-                logger.error(f"Error in monitor loop: {e}")
+                logger.error(f"Error in main loop: {e}")
                 await asyncio.sleep(5)
 
-    async def confirm_5s_rejection(self, direction: OrderDirection) -> bool:
-        """Monitor 5s candles for rejection patterns: Stall, Spike & Pull, or Reversal Candle"""
-        logger.info(f"Monitoring 5s confirmation for {direction.value}...")
+    async def confirm_5s_rejection(self, asset: str, direction: OrderDirection) -> bool:
+        logger.info(f"Waiting for 5s rejection on {asset}...")
         start_time = time.time()
 
         while time.time() - start_time < self.rejection_window:
-            candles_5s = await self.client.get_candles(self.asset, 5, count=4)
+            candles_5s = await self.client.get_candles(asset, 5, count=4)
             if len(candles_5s) < 4:
                 await asyncio.sleep(1)
                 continue
 
             last = candles_5s[-1]
             prev = candles_5s[-2]
-
             body = abs(last.close - last.open)
             wick_top = last.high - max(last.open, last.close)
             wick_bottom = min(last.open, last.close) - last.low
             total_size = last.high - last.low if last.high > last.low else 0.0001
 
-            # 1. Momentum Breakout Check (Invalidation)
-            # If 2 consecutive 5s candles close strongly outside the zone boundary, it's a breakout.
-            if direction == OrderDirection.PUT and last.close > last.open and body / total_size > 0.8:
-                logger.info("5s High Momentum detected. Waiting for exhaustion.")
-                # We don't immediately return False, we wait to see if it pulls back (The Trap)
+            # Rejection: Opposite move or long wick
+            if direction == OrderDirection.PUT:
+                if (last.close < last.open and prev.close > prev.open) or (wick_top > body * 1.5):
+                    logger.info(f"5s Rejection confirmed for {asset} PUT")
+                    return True
+            else: # CALL
+                if (last.close > last.open and prev.close < prev.open) or (wick_bottom > body * 1.5):
+                    logger.info(f"5s Rejection confirmed for {asset} CALL")
+                    return True
 
-            # 2. The Stall (2-3 small candles)
-            if all(abs(c.close - c.open) < (c.high - c.low) * 0.4 for c in candles_5s[-3:]):
-                logger.info("5s Stall detected at level.")
-                return True
-
-            # 3. Spike & Pull (Trap)
-            # If current candle has a long wick in the direction of the level
-            if direction == OrderDirection.PUT and wick_top > body * 1.5:
-                logger.info("5s Upper Rejection Wick (Spike & Pull) detected.")
-                return True
-            if direction == OrderDirection.CALL and wick_bottom > body * 1.5:
-                logger.info("5s Lower Rejection Wick (Spike & Pull) detected.")
-                return True
-
-            # 4. Fast Rejection (Opposite color candle)
-            if direction == OrderDirection.PUT and last.close < last.open and prev.close > prev.open:
-                 logger.info("5s Fast Rejection (Bearish Engulfing/Reversal) detected.")
-                 return True
-            if direction == OrderDirection.CALL and last.close > last.open and prev.close < prev.open:
-                 logger.info("5s Fast Rejection (Bullish Engulfing/Reversal) detected.")
-                 return True
+            # Momentum Invalidation
+            if body / total_size > 0.85 and ((direction == OrderDirection.PUT and last.close > last.open) or (direction == OrderDirection.CALL and last.close < last.open)):
+                logger.info(f"{asset} strong momentum. Entry invalidated.")
+                return False
 
             await asyncio.sleep(1)
-
         return False
 
-    async def execute_trade(self, direction: OrderDirection):
+    async def execute_trade(self, asset: str, direction: OrderDirection):
         stake = await self.get_stake()
-        logger.info(f"Placing {direction.value} order with stake ${stake}")
+        logger.info(f"EXECUTE: {direction.value} on {asset} | Stake: ${stake}")
 
         try:
-            order = await self.client.place_order(self.asset, stake, direction, 60)
-            logger.info(f"Order placed: {order.order_id}")
-
-            # Wait for result
+            order = await self.client.place_order(asset, stake, direction, 60)
             result = await self.client.check_win(order.order_id)
             if result:
                 status = result.get('status')
-                logger.info(f"Trade Result: {status}")
-
+                logger.success(f"{asset} RESULT: {status}")
                 self.trades_taken_today += 1
                 if status == 'win':
                     self.current_losses_streak = 0
                 else:
                     self.current_losses_streak += 1
         except Exception as e:
-            logger.error(f"Failed to execute trade: {e}")
+            logger.error(f"Trade failed on {asset}: {e}")
