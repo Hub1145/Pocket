@@ -1,6 +1,7 @@
 # Trusted Spots 1-Minute Trading Strategy Guide
+## ($10 to $10,000 Challenge Edition)
 
-This guide synthesizes the trading strategy and lessons from the "TRUSTED SPOTS" 100-Day/100K Trading Challenge.
+This guide synthesizes the trading strategy and lessons from the "TRUSTED SPOTS" Trading Challenge, optimized for a **$10 to $10,000** compounding journey.
 
 ## 1. Strategy Overview
 - **Platform**: Pocket Option (or Quotex).
@@ -49,12 +50,17 @@ The core of the execution is the **Micro-Rejection** technique:
 5. **Trade**: Enter a 1-minute trade in the direction of the reversal.
 
 ## 6. Observed Risk Management: The "Kill Switch"
-The strategy relies on a strict **Kill Switch Strategy** to survive the 75-day compounding journey:
+The strategy relies on a strict **Kill Switch Strategy** to survive the compounding journey:
+- **Starting Balance**: $10.
+- **Compounding Goal**: $10,000.
 - **Daily Target**: **15% profit** on the starting balance of the day.
-- **Trade Count**: Typically **3 trades per day**. He stops immediately once the 15% target is reached.
-- **Compounding Structure**: Starting with $100, the goal is to compound 15% daily over **75 days** to reach $100,000.
-- **Observed Stop Loss**: If he suffers **2 consecutive losses** or if the market conditions (e.g., high volatility or news) stop respecting the SNR levels, he activates the "Kill Switch" and stops for the day.
-- **Fixed Stake**: Each trade is roughly **5% to 7%** of the account balance (allowing for ~3 trades to reach the 15% target with ~80%+ payouts).
+- **Trade Count**: Typically **3 high-quality trades** per day. Stop immediately once the 15% target is reached.
+- **Compounding Duration**: With a 15% daily gain, $10 turns into $10,000 in approximately **50 days** of successful trading.
+- **Observed Stop Loss**: If you suffer **2 consecutive losses** or if market conditions stop respecting the SNR zones, activate the "Kill Switch" and stop for the day to preserve capital.
+- **Small Account Stake**:
+    - At $10, each trade should be **$1 to $2** (10-20% of balance initially due to platform minimums).
+    - As the account grows, move towards a fixed **5% to 7%** stake per trade.
+    - **Never Martingale**: Do not double your stake after a loss.
 
 ## 7. Psychology & Discipline
 - **Selective Trading**: Quality > Quantity. He only trades when all 5 SNR criteria and the 5-second confirmation align.
@@ -82,6 +88,14 @@ If you are building a bot for this strategy, follow this logic flow:
    - If a 5s candle closes **inside** the zone or shows a **rejection wick** (Wick > 50% of candle body) -> **SIGNAL BUY/SELL**.
    - If a 5s candle closes **outside** the zone with a body > 80% of total length (Full Momentum) -> **WAIT/CANCEL**.
 5. **Trade**: 1 Minute Expiry in the opposite direction of the Approach.
+6. **Account Scaling (Bot Stake)**:
+   - If `Balance` < $20: `Stake` = $1 (Minimum).
+   - If `Balance` >= $20: `Stake` = `Balance * 0.05` (5% risk).
+   - Max trades per day = 3.
+   - Session Stop = If `Profit_Daily` >= `Balance_Start * 0.15` OR `Loss_Daily` >= 2.
+
+## 11. Challenge Reset Rule
+If at any point the discipline is broken (over-trading, revenge trading, or ignoring the Kill Switch), the challenge must be **reset to Day 1** ($10). Consistency in following the process is more important than the daily result.
 
 ---
 *Disclaimer: Trading involves significant risk. This guide is for educational purposes based on the analyzed content.*
