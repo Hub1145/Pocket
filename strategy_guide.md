@@ -65,8 +65,8 @@ The strategy relies on a strict **Kill Switch Strategy** to survive the compound
 - **Compounding Duration**: With a 30% daily gain, $10 turns into $10,000 in approximately **27 days** of successful trading.
 - **Observed Stop Loss**: If you suffer **3 consecutive losses** or if market conditions stop respecting the SNR zones, activate the "Kill Switch" and stop for the day to preserve capital.
 - **Small Account Stake**:
-    - At $10, each trade should be **$1 to $2** (10-20% of balance initially due to platform minimums).
-    - As the account grows, move towards a fixed **5% to 7%** stake per trade.
+    - If balance is below **$20**, use a fixed **$1 stake**.
+    - If balance is above **$20**, move towards a fixed **5%** compounding stake per trade.
     - **Never Martingale**: Do not double your stake after a loss.
 
 ## 7. Psychology & Discipline

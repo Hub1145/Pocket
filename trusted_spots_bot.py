@@ -236,14 +236,14 @@ class TrustedSpotsBot:
 
     async def get_stake(self) -> float:
         """Refined Stake Logic for $10-$10k Challenge:
-        - If balance < $20, use $2 stake (as requested).
+        - If balance < $20, use $1 stake (corrected).
         - If balance >= $20, use 5% compounding stake.
         """
         balance_info = await self.client.get_balance()
         balance = balance_info.balance
 
         if balance < 20.0:
-            stake = 2.0
+            stake = 1.0
         else:
             # 5% Compounding Stake
             stake = round(balance * 0.05, 2)
