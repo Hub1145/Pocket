@@ -10,18 +10,28 @@ from pocketoptionapi_async import AsyncPocketOptionClient, OrderDirection, Order
 from pocketoptionapi_async.models import Candle
 
 class TrustedSpotsBot:
-    def __init__(self, ssid: str, asset: str = "EURUSD_otc", is_demo: bool = True):
-        self.client = AsyncPocketOptionClient(ssid, is_demo=is_demo)
-        self.asset = asset
-        self.is_demo = is_demo
+    def __init__(self, config: Dict):
+        self.config = config
+        self.ssid = config.get("POCKET_OPTION_SSID")
+        self.asset = config.get("asset", "EURUSD_otc")
+        self.is_demo = config.get("is_demo", True)
+
+        self.client = AsyncPocketOptionClient(self.ssid, is_demo=self.is_demo)
 
         # Risk Management State
+        rm_config = config.get("risk_management", {})
         self.start_balance = 0.0
-        self.daily_target_pct = 0.15
-        self.max_losses_streak = 2
+        self.daily_target_pct = rm_config.get("daily_target_pct", 0.15)
+        self.max_losses_streak = rm_config.get("max_losses_streak", 2)
+        self.max_trades_per_day = rm_config.get("max_trades_per_day", 3)
+
         self.current_losses_streak = 0
         self.trades_taken_today = 0
-        self.max_trades_per_day = 3
+
+        # Automation Params
+        auto_config = config.get("automation", {})
+        self.snr_update_interval = auto_config.get("snr_update_interval_mins", 15)
+        self.rejection_window = auto_config.get("rejection_monitor_seconds", 30)
 
         # SNR Zones
         self.resistance_zones = []
@@ -156,9 +166,9 @@ class TrustedSpotsBot:
                     logger.info("Session goals/limits met. Stopping bot.")
                     break
 
-                # 1. Periodically refresh SNR zones (every 15 mins)
+                # 1. Periodically refresh SNR zones
                 now = datetime.now()
-                if not self.resistance_zones or now.minute % 15 == 0:
+                if not self.resistance_zones or now.minute % self.snr_update_interval == 0:
                     await self.update_snr_zones()
 
                 # 2. Monitor 1-minute price for zone entry
@@ -209,7 +219,7 @@ class TrustedSpotsBot:
         logger.info(f"Monitoring 5s confirmation for {direction.value}...")
         start_time = time.time()
 
-        while time.time() - start_time < 30: # 30s window for rejection
+        while time.time() - start_time < self.rejection_window:
             candles_5s = await self.client.get_candles(self.asset, 5, count=4)
             if len(candles_5s) < 4:
                 await asyncio.sleep(1)
@@ -276,29 +286,3 @@ class TrustedSpotsBot:
                     self.current_losses_streak += 1
         except Exception as e:
             logger.error(f"Failed to execute trade: {e}")
-
-async def main():
-    # Recommended: Set SSID as an environment variable
-    # SSID format: 42["auth",{"session":"...","isDemo":1,"uid":...,"platform":1}]
-    SSID = os.getenv("POCKET_OPTION_SSID")
-
-    if not SSID:
-        logger.error("POCKET_OPTION_SSID environment variable not found.")
-        print("\nPlease export your SSID:")
-        print('export POCKET_OPTION_SSID=\'42["auth",{"session":"...","isDemo":1,...}]\'')
-        return
-
-    bot = TrustedSpotsBot(SSID, asset="EURUSD_otc", is_demo=True)
-
-    try:
-        await bot.initialize()
-        await bot.monitor_and_trade()
-    except KeyboardInterrupt:
-        logger.info("Bot stopped by user.")
-    finally:
-        if bot.client.is_connected:
-            await bot.client.disconnect()
-            logger.info("Disconnected from PocketOption.")
-
-if __name__ == "__main__":
-    asyncio.run(main())

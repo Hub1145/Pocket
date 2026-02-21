@@ -1,0 +1,16 @@
+{
+    "POCKET_OPTION_SSID": "42[\"auth\",{\"session\":\"your_session_id_here\",\"isDemo\":1,\"uid\":0,\"platform\":1}]",
+    "asset": "EURUSD_otc",
+    "is_demo": true,
+    "risk_management": {
+        "start_balance": 10.0,
+        "daily_target_pct": 0.15,
+        "max_losses_streak": 2,
+        "max_trades_per_day": 3,
+        "compounding_goal": 10000.0
+    },
+    "automation": {
+        "snr_update_interval_mins": 15,
+        "rejection_monitor_seconds": 30
+    }
+}
