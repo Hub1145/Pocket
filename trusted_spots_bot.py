@@ -33,7 +33,7 @@ class TrustedSpotsBot:
         self.kill_switch_active = False
         self.stop_event = asyncio.Event()
 
-        # Automation Params
+        # Automation Params (LuxAlgo Config)
         auto_config = config.get("automation", {})
         self.snr_update_interval = auto_config.get("snr_update_interval_mins", 15)
         self.rejection_window = auto_config.get("rejection_monitor_seconds", 30)
@@ -159,7 +159,7 @@ class TrustedSpotsBot:
                     self.cooldown_until[asset] = time.time() + 30
                     return
 
-                logger.info(f"[{asset}] Zone Touch: {current_price}")
+                logger.info(f"[{asset}] LuxAlgo: Pivot Point Touch: {current_price}")
                 self.asset_states[asset] = "TOUCHING"
                 self.touch_start_time[asset] = time.time()
                 self.config[f"{asset}_target_dir"] = target_dir
@@ -199,6 +199,7 @@ class TrustedSpotsBot:
         return None
 
     async def _check_rejection_confirmed(self, asset: str, stream_data: Dict, direction: OrderDirection) -> bool:
+        """Analyze the stream data for LuxAlgo Rejection Patterns"""
         candles = self.client._parse_stream_candles(stream_data, asset, 5)
         if len(candles) < 2: return False
         last, prev = candles[-1], candles[-2]
@@ -206,10 +207,23 @@ class TrustedSpotsBot:
         last_range = last.high - last.low if last.high > last.low else 0.0001
         wick_top, wick_bottom = last.high - max(last.open, last.close), min(last.open, last.close) - last.low
 
-        if direction == OrderDirection.PUT and last.close < last.open and prev.close > prev.open and last_body > prev_body * 0.7: return True
-        if direction == OrderDirection.CALL and last.close > last.open and prev.close < prev.open and last_body > prev_body * 0.7: return True
-        if direction == OrderDirection.PUT and wick_top > last_body * 1.8: return True
-        if direction == OrderDirection.CALL and wick_bottom > last_body * 1.8: return True
+        # 1. Engulfing (Momentum Shift)
+        if direction == OrderDirection.PUT and last.close < last.open and prev.close > prev.open and last_body > prev_body * 0.7:
+            logger.info(f"[{asset}] LuxAlgo: Bearish Rejection Confirmed.")
+            return True
+        if direction == OrderDirection.CALL and last.close > last.open and prev.close < prev.open and last_body > prev_body * 0.7:
+            logger.info(f"[{asset}] LuxAlgo: Bullish Rejection Confirmed.")
+            return True
+
+        # 2. Pin Bars (LuxAlgo Wicks)
+        if direction == OrderDirection.PUT and wick_top > last_body * 1.8:
+            logger.info(f"[{asset}] LuxAlgo: Shooting Star Wick detected.")
+            return True
+        if direction == OrderDirection.CALL and wick_bottom > last_body * 1.8:
+            logger.info(f"[{asset}] LuxAlgo: Hammer Wick detected.")
+            return True
+
+        # 3. Indecision (Doji)
         if last_body < last_range * 0.1: return True
         return False
 
@@ -240,90 +254,56 @@ class TrustedSpotsBot:
     async def update_snr_zones(self, asset: str):
         """Remap SNR using LuxAlgo Pivot Point logic"""
         try:
-            # Fetch more candles to accurately calculate long-term EMAs and Pivots
             candles = await self.client.get_candles(asset, 60, count=300)
             if not candles: return
             self.resistance_zones[asset], self.support_zones[asset] = [], []
+            df = pd.DataFrame([{'high': c.high, 'low': c.low, 'open': c.open, 'close': c.close, 'volume': c.volume or 0} for c in candles])
 
-            df = pd.DataFrame([{
-                'high': c.high, 'low': c.low,
-                'open': c.open, 'close': c.close,
-                'volume': c.volume or 0
-            } for c in candles])
-
-            # Volume Oscillator (LuxAlgo Logic)
+            # LuxAlgo Volume Oscillator
             if 'volume' in df and len(df) > 10:
                 short_vol = df['volume'].ewm(span=5, adjust=False).mean()
                 long_vol = df['volume'].ewm(span=10, adjust=False).mean()
                 df['vol_osc'] = 100 * (short_vol - long_vol) / long_vol
-            else:
-                df['vol_osc'] = 0
+            else: df['vol_osc'] = 0
 
-            # Pivot Calculation
+            # LuxAlgo Pivot logic (LeftBars, RightBars)
             def get_pivots(data, left, right):
-                high_pivots = []
-                low_pivots = []
+                hp, lp = [], []
                 for i in range(left, len(data) - right):
-                    # Pivot High
-                    is_high = True
-                    for j in range(i - left, i + right + 1):
-                        if data['high'].iloc[j] > data['high'].iloc[i]:
-                            is_high = False
-                            break
-                    if is_high:
-                        high_pivots.append(i)
-
-                    # Pivot Low
-                    is_low = True
-                    for j in range(i - left, i + right + 1):
-                        if data['low'].iloc[j] < data['low'].iloc[i]:
-                            is_low = False
-                            break
-                    if is_low:
-                        low_pivots.append(i)
-                return high_pivots, low_pivots
+                    if data['high'].iloc[i] == data['high'].iloc[i-left:i+right+1].max(): hp.append(i)
+                    if data['low'].iloc[i] == data['low'].iloc[i-left:i+right+1].min(): lp.append(i)
+                return hp, lp
 
             hp_indices, lp_indices = get_pivots(df, self.left_bars, self.right_bars)
 
-            # Map Pivots to Zones
             for idx in hp_indices:
                 self.resistance_zones[asset].append({
-                    'upper': df['high'].iloc[idx],
-                    'lower': max(df['open'].iloc[idx], df['close'].iloc[idx]),
+                    'upper': df['high'].iloc[idx], 'lower': max(df['open'].iloc[idx], df['close'].iloc[idx]),
                     'vol_osc': df['vol_osc'].iloc[idx] if 'vol_osc' in df else 0
                 })
-
             for idx in lp_indices:
                 self.support_zones[asset].append({
-                    'lower': df['low'].iloc[idx],
-                    'upper': min(df['open'].iloc[idx], df['close'].iloc[idx]),
+                    'lower': df['low'].iloc[idx], 'upper': min(df['open'].iloc[idx], df['close'].iloc[idx]),
                     'vol_osc': df['vol_osc'].iloc[idx] if 'vol_osc' in df else 0
                 })
 
-            # Keep only unique/significant zones (Cluster if needed, here we just keep recent ones)
-            # Pine script uses the most recent highUsePivot/lowUsePivot
             self.resistance_zones[asset] = self.resistance_zones[asset][-5:]
             self.support_zones[asset] = self.support_zones[asset][-5:]
-
             self.last_snr_update[asset] = datetime.now()
             self._report_update()
         except Exception as e:
-            logger.error(f"SNR Update Error ({asset}): {e}")
+            logger.error(f"LuxAlgo SNR Error ({asset}): {e}")
 
     async def monitor_and_trade(self):
         logger.info("Bot logic active.")
         while not self.stop_event.is_set():
             try:
-                # Daily Reset Check
                 if datetime.now().date() > self.current_day:
-                    logger.info("New day detected. Resetting session...")
                     await self.start_new_session()
                     self.current_day = datetime.now().date()
-
                 if self.kill_switch_active:
                     await asyncio.sleep(60)
                     continue
-
                 for asset in self.assets:
                     if datetime.now() - self.last_snr_update[asset] > timedelta(minutes=self.snr_update_interval):
                         await self.update_snr_zones(asset)
